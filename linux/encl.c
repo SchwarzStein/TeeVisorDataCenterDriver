@@ -162,7 +162,8 @@ static int sgx_vma_fault(struct vm_fault *vmf)
 	struct sgx_encl_page *entry;
 	unsigned long phys_addr;
 	struct sgx_encl *encl;
-	unsigned long pfn;
+	pte_t *pte;
+	spinlock_t *ptl;
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0))
 	vm_fault_t ret;
 #else
@@ -194,7 +195,7 @@ static int sgx_vma_fault(struct vm_fault *vmf)
 	phys_addr = sgx_get_epc_phys_addr(entry->epc_page);
 
 	/* Check if another thread got here first to insert the PTE. */
-	if (!follow_pfn(vma, addr, &pfn)) {
+	if (!follow_pte(vma, addr, &pte, &ptl)) {
 		mutex_unlock(&encl->lock);
 
 		return VM_FAULT_NOPAGE;

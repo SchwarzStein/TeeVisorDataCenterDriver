@@ -6,6 +6,7 @@
 #include <linux/kthread.h>
 #include <linux/pagemap.h>
 #include <linux/ratelimit.h>
+#include <linux/vmalloc.h>
 #include <linux/sched/mm.h>
 #include <linux/sched/signal.h>
 #include <linux/slab.h>
