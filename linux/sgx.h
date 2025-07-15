@@ -7,11 +7,12 @@
 #include <linux/io.h>
 #include <linux/rwsem.h>
 #include <linux/types.h>
+#include <linux/pfn.h>
 #include <asm/asm.h>
 #include "arch.h"
 
 #undef pr_fmt
-#define pr_fmt(fmt) "intel_sgx: " fmt
+#define pr_fmt(fmt) "teevisor: " fmt
 
 #define SGX_MAX_EPC_SECTIONS		8
 #define SGX_EEXTEND_BLOCK_SIZE		256
@@ -23,7 +24,7 @@
 #define SGX_EPC_PAGE_RECLAIMER_TRACKED	BIT(0)
 
 struct sgx_epc_page {
-	unsigned int section;
+	unsigned long pfn;
 	unsigned int flags;
 	struct sgx_encl_page *owner;
 	struct list_head list;
@@ -54,8 +55,14 @@ struct sgx_epc_section {
 	struct list_head init_laundry_list;
 };
 
-extern struct sgx_epc_section sgx_epc_sections[SGX_MAX_EPC_SECTIONS];
+//extern struct sgx_epc_section sgx_epc_sections[SGX_MAX_EPC_SECTIONS];
 
+static inline unsigned long sgx_get_epc_phys_addr(struct sgx_epc_page *page)
+{
+	return PFN_PHYS(page->pfn);
+}
+
+/*
 static inline unsigned long sgx_get_epc_phys_addr(struct sgx_epc_page *page)
 {
 	struct sgx_epc_section *section = &sgx_epc_sections[page->section];
@@ -76,11 +83,12 @@ static inline void *sgx_get_epc_virt_addr(struct sgx_epc_page *page)
 	return section->virt_addr + index * PAGE_SIZE;
 }
 
+*/
 struct sgx_epc_page *__sgx_alloc_epc_page(void);
 void sgx_free_epc_page(struct sgx_epc_page *page);
 
-void sgx_mark_page_reclaimable(struct sgx_epc_page *page);
-int sgx_unmark_page_reclaimable(struct sgx_epc_page *page);
+//void sgx_mark_page_reclaimable(struct sgx_epc_page *page);
+//int sgx_unmark_page_reclaimable(struct sgx_epc_page *page);
 struct sgx_epc_page *sgx_alloc_epc_page(void *owner, bool reclaim);
 
 #endif /* _X86_SGX_H */

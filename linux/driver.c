@@ -14,11 +14,11 @@
 #include "version.h"
 
 MODULE_DESCRIPTION(DRV_DESCRIPTION);
-MODULE_AUTHOR("Jarkko Sakkinen <jarkko.sakkinen@linux.intel.com>");
+MODULE_AUTHOR("Yiliang Dong <dongyiliangsteven@163.com>");
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_VERSION(DRV_VERSION);
 
-u64 sgx_attributes_reserved_mask;
+u64 sgx_attributes_reserved_mask = SGX_ATTR_RESERVED_MASK;
 u64 sgx_xfrm_reserved_mask = ~0x3;
 u32 sgx_misc_reserved_mask;
 
@@ -38,7 +38,7 @@ static int sgx_open(struct inode *inode, struct file *file)
 	INIT_RADIX_TREE(&encl->page_tree, GFP_KERNEL);
 #endif
 	mutex_init(&encl->lock);
-	INIT_LIST_HEAD(&encl->va_pages);
+	//INIT_LIST_HEAD(&encl->va_pages);
 	INIT_LIST_HEAD(&encl->mm_list);
 	spin_lock_init(&encl->mm_lock);
 
@@ -49,7 +49,7 @@ static int sgx_open(struct inode *inode, struct file *file)
 	}
 
 	file->private_data = encl;
-
+	pr_info("sgx_open finished\n");
 	return 0;
 }
 
@@ -87,6 +87,7 @@ static int sgx_release(struct inode *inode, struct file *file)
 	}
 
 	kref_put(&encl->refcount, sgx_encl_release);
+	pr_info("device closed\n");
 	return 0;
 }
 
@@ -145,36 +146,45 @@ static const struct file_operations sgx_encl_fops = {
 	.get_unmapped_area	= sgx_get_unmapped_area,
 };
 
+/*
 const struct file_operations sgx_provision_fops = {
 	.owner			= THIS_MODULE,
 };
+*/
 
 static struct miscdevice sgx_dev_enclave = {
 	.minor = MISC_DYNAMIC_MINOR,
-	.name = "sgx_enclave",
-	.nodename = "sgx_enclave",
+	.name = "teevisor",
+	.nodename = "teevisor",
 	.fops = &sgx_encl_fops,
+	.mode = 0666,
 };
 
+/*
 static struct miscdevice sgx_dev_provision = {
 	.minor = MISC_DYNAMIC_MINOR,
 	.name = "sgx_provision",
 	.nodename = "sgx_provision",
 	.fops = &sgx_provision_fops,
 };
+*/
 
 int __init sgx_drv_init(void)
-{
+{	
+	/*
 	unsigned int eax, ebx, ecx, edx;
 	u64 attr_mask;
 	u64 xfrm_mask;
 	int ret;
 
+	
 	if (!boot_cpu_has(X86_FEATURE_SGX_LC)) {
 		pr_info("The public key MSRs are not writable.\n");
 		return -ENODEV;
 	}
+	*/
 
+	/*
 	cpuid_count(SGX_CPUID, 0, &eax, &ebx, &ecx, &edx);
 
 	if (!(eax & 1))  {
@@ -188,24 +198,26 @@ int __init sgx_drv_init(void)
 
 	attr_mask = (((u64)ebx) << 32) + (u64)eax;
 	sgx_attributes_reserved_mask = ~attr_mask | SGX_ATTR_RESERVED_MASK;
-
-	if (boot_cpu_has(X86_FEATURE_OSXSAVE)) {
-		xfrm_mask = (((u64)edx) << 32) + (u64)ecx;
-		sgx_xfrm_reserved_mask = ~xfrm_mask;
+	*/
+	sgx_misc_reserved_mask = SGX_MISC_RESERVED_MASK;
+	if (boot_cpu_has(X86_FEATURE_OSXSAVE) && boot_cpu_has(X86_FEATURE_AVX)) {
+		sgx_xfrm_reserved_mask = ~0x7;
 	}
 
-	ret = misc_register(&sgx_dev_enclave);
+	int ret = misc_register(&sgx_dev_enclave);
 	if (ret) {
-		pr_err("Creating /dev/sgx_enclave failed with %d.\n", ret);
+		pr_err("Creating /dev/teevisor_enclave failed with %d.\n", ret);
 		return ret;
 	}
 
+	/*
 	ret = misc_register(&sgx_dev_provision);
 	if (ret) {
 		pr_err("Creating /dev/sgx_provision failed with %d.\n", ret);
 		misc_deregister(&sgx_dev_enclave);
 		return ret;
 	}
+	*/
 
 	return 0;
 }
@@ -213,7 +225,7 @@ int __init sgx_drv_init(void)
 int __exit sgx_drv_exit(void)
 {
 	misc_deregister(&sgx_dev_enclave);
-	misc_deregister(&sgx_dev_provision);
+	//misc_deregister(&sgx_dev_provision);
 
 	return 0;
 }

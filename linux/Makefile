@@ -3,8 +3,8 @@
 
 ifneq ($(KERNELRELEASE),)
 
-obj-m += intel_sgx.o
-intel_sgx-y := encl.o main.o driver.o ioctl.o
+obj-m += teevisor.o
+teevisor-y := encl.o main.o driver.o ioctl.o
 
 else
 

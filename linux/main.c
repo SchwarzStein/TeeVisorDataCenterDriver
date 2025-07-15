@@ -10,6 +10,8 @@
 #include <linux/sched/mm.h>
 #include <linux/sched/signal.h>
 #include <linux/slab.h>
+#include <linux/mm.h>
+#include <asm/sev.h>
 #include "driver.h"
 #include "encl.h"
 #include "encls.h"
@@ -27,9 +29,9 @@
 
 static void (*k_mmput_async)(struct mm_struct* mm);
 
-struct sgx_epc_section sgx_epc_sections[SGX_MAX_EPC_SECTIONS];
-static int sgx_nr_epc_sections;
-static struct task_struct *ksgxd_tsk;
+//struct sgx_epc_section sgx_epc_sections[SGX_MAX_EPC_SECTIONS];
+//static int sgx_nr_epc_sections;
+//static struct task_struct *ksgxd_tsk;
 static DECLARE_WAIT_QUEUE_HEAD(ksgxd_waitq);
 
 /*
@@ -38,24 +40,28 @@ static DECLARE_WAIT_QUEUE_HEAD(ksgxd_waitq);
  */
 static LIST_HEAD(sgx_active_page_list);
 
-static DEFINE_SPINLOCK(sgx_reclaimer_lock);
+// This list is stores all the allocated page.
+static LIST_HEAD(sgx_page_pool);
+static DEFINE_SPINLOCK(sgx_page_pool_lock);
+//static DEFINE_SPINLOCK(sgx_reclaimer_lock);
 
 /*
  * Reset dirty EPC pages to uninitialized state. Laundry can be left with SECS
  * pages whose child pages blocked EREMOVE.
  */
+/*
 static void sgx_sanitize_section(struct sgx_epc_section *section)
 {
 	struct sgx_epc_page *page;
 	LIST_HEAD(dirty);
 	int ret;
 
-	/* init_laundry_list is thread-local, no need for a lock: */
+	// init_laundry_list is thread-local, no need for a lock:
 	while (!list_empty(&section->init_laundry_list)) {
 		if (kthread_should_stop())
 			return;
 
-		/* needed for access to ->page_list: */
+		// needed for access to ->page_list:
 		spin_lock(&section->lock);
 
 		page = list_first_entry(&section->init_laundry_list,
@@ -74,7 +80,9 @@ static void sgx_sanitize_section(struct sgx_epc_section *section)
 
 	list_splice(&dirty, &section->init_laundry_list);
 }
+*/
 
+/*
 static bool sgx_reclaimer_age(struct sgx_epc_page *epc_page)
 {
 	struct sgx_encl_page *page = epc_page->owner;
@@ -113,7 +121,9 @@ static bool sgx_reclaimer_age(struct sgx_epc_page *epc_page)
 
 	return true;
 }
+*/
 
+/*
 static void sgx_reclaimer_block(struct sgx_epc_page *epc_page)
 {
 	struct sgx_encl_page *page = epc_page->owner;
@@ -127,7 +137,7 @@ static void sgx_reclaimer_block(struct sgx_epc_page *epc_page)
 	do {
 		mm_list_version = encl->mm_list_version;
 
-		/* Pairs with smp_rmb() in sgx_encl_mm_add(). */
+		*//* Pairs with smp_rmb() in sgx_encl_mm_add(). *//*
 		smp_rmb();
 
 		idx = srcu_read_lock(&encl->srcu);
@@ -164,7 +174,9 @@ static void sgx_reclaimer_block(struct sgx_epc_page *epc_page)
 
 	mutex_unlock(&encl->lock);
 }
+*/
 
+/*
 static int __sgx_encl_ewb(struct sgx_epc_page *epc_page, void *va_slot,
 			  struct sgx_backing *backing)
 {
@@ -186,22 +198,26 @@ static int __sgx_encl_ewb(struct sgx_epc_page *epc_page, void *va_slot,
 
 	return ret;
 }
+*/
 
+/*
 static void sgx_ipi_cb(void *info)
 {
 }
+*/
 
+/*
 static const cpumask_t *sgx_encl_ewb_cpumask(struct sgx_encl *encl)
 {
 	cpumask_t *cpumask = &encl->cpumask;
 	struct sgx_encl_mm *encl_mm;
 	int idx;
-
+	*/
 	/*
 	 * Can race with sgx_encl_mm_add(), but ETRACK has already been
 	 * executed, which means that the CPUs running in the new mm will enter
 	 * into the enclave with a fresh epoch.
-	 */
+	 *//*
 	cpumask_clear(cpumask);
 
 	idx = srcu_read_lock(&encl->srcu);
@@ -219,6 +235,7 @@ static const cpumask_t *sgx_encl_ewb_cpumask(struct sgx_encl *encl)
 
 	return cpumask;
 }
+*/
 
 /*
  * Swap page to the regular memory transformed to the blocked state by using
@@ -230,6 +247,7 @@ static const cpumask_t *sgx_encl_ewb_cpumask(struct sgx_encl *encl)
  * before EWB. If that fails we kick all the HW threads out, and then do EWB,
  * which should be guaranteed the succeed.
  */
+/*
 static void sgx_encl_ewb(struct sgx_epc_page *epc_page,
 			 struct sgx_backing *backing)
 {
@@ -259,13 +277,13 @@ static void sgx_encl_ewb(struct sgx_epc_page *epc_page,
 
 		ret = __sgx_encl_ewb(epc_page, va_slot, backing);
 		if (ret == SGX_NOT_TRACKED) {
-			/*
+			*//*
 			 * Slow path, send IPIs to kick cpus out of the
 			 * enclave.  Note, it's imperative that the cpu
 			 * mask is generated *after* ETRACK, else we'll
 			 * miss cpus that entered the enclave between
 			 * generating the mask and incrementing epoch.
-			 */
+			 *//*
 			on_each_cpu_mask(sgx_encl_ewb_cpumask(encl),
 					 sgx_ipi_cb, NULL, 1);
 			ret = __sgx_encl_ewb(epc_page, va_slot, backing);
@@ -282,7 +300,9 @@ static void sgx_encl_ewb(struct sgx_epc_page *epc_page,
 		encl_page->va_page = va_page;
 	}
 }
+*/
 
+/*
 static void sgx_reclaimer_write(struct sgx_epc_page *epc_page,
 				struct sgx_backing *backing)
 {
@@ -314,6 +334,7 @@ static void sgx_reclaimer_write(struct sgx_epc_page *epc_page,
 out:
 	mutex_unlock(&encl->lock);
 }
+*/
 
 /*
  * Take a fixed number of pages from the head of the active page pool and
@@ -328,6 +349,7 @@ out:
  * problematic as it would increase the lock contention too much, which would
  * halt forward progress.
  */
+/*
 static void sgx_reclaim_pages(void)
 {
 	struct sgx_epc_page *chunk[SGX_NR_TO_SCAN];
@@ -352,11 +374,11 @@ static void sgx_reclaim_pages(void)
 
 		if (kref_get_unless_zero(&encl_page->encl->refcount) != 0)
 			chunk[cnt++] = epc_page;
-		else
+		else*/
 			/* The owner is freeing the page. No need to add the
 			 * page back to the list of reclaimable pages.
 			 */
-			epc_page->flags &= ~SGX_EPC_PAGE_RECLAIMER_TRACKED;
+			/*epc_page->flags &= ~SGX_EPC_PAGE_RECLAIMER_TRACKED;
 	}
 	spin_unlock(&sgx_reclaimer_lock);
 
@@ -412,7 +434,8 @@ skip:
 		spin_unlock(&section->lock);
 	}
 }
-
+*/
+/*
 static unsigned long sgx_nr_free_pages(void)
 {
 	unsigned long cnt = 0;
@@ -423,33 +446,39 @@ static unsigned long sgx_nr_free_pages(void)
 
 	return cnt;
 }
+*/
 
+/*
 static bool sgx_should_reclaim(unsigned long watermark)
 {
 	return sgx_nr_free_pages() < watermark &&
 	       !list_empty(&sgx_active_page_list);
 }
+*/
 
+/*
 static int ksgxd(void *p)
 {
 	int i;
 
 	set_freezable();
-
+	*/
 	/*
 	 * Sanitize pages in order to recover from kexec(). The 2nd pass is
 	 * required for SECS pages, whose child pages blocked EREMOVE.
 	 */
+	/*
 	for (i = 0; i < sgx_nr_epc_sections; i++)
 		sgx_sanitize_section(&sgx_epc_sections[i]);
 
 	for (i = 0; i < sgx_nr_epc_sections; i++) {
 		sgx_sanitize_section(&sgx_epc_sections[i]);
 
-		/* Should never happen. */
+		// Should never happen.
 		if (!list_empty(&sgx_epc_sections[i].init_laundry_list))
 			WARN(1, "EPC section %d has unsanitized pages.\n", i);
 	}
+
 
 	while (!kthread_should_stop()) {
 		if (try_to_freeze())
@@ -467,7 +496,9 @@ static int ksgxd(void *p)
 
 	return 0;
 }
+*/
 
+/*
 static bool __init sgx_page_reclaimer_init(void)
 {
 	struct task_struct *tsk;
@@ -480,7 +511,8 @@ static bool __init sgx_page_reclaimer_init(void)
 
 	return true;
 }
-
+*/
+/*
 // Based on arch/x86/kernel/cpu/intel.c
 static bool detect_sgx(struct cpuinfo_x86 *c)
 {
@@ -509,8 +541,14 @@ static bool detect_sgx(struct cpuinfo_x86 *c)
 
     return true;
 }
+*/
 
+static inline bool detect_svsm(void)
+{
+    return snp_vmpl > 0;
+}
 
+/*
 static struct sgx_epc_page *__sgx_alloc_epc_page_from_section(struct sgx_epc_section *section)
 {
 	struct sgx_epc_page *page;
@@ -529,6 +567,7 @@ static struct sgx_epc_page *__sgx_alloc_epc_page_from_section(struct sgx_epc_sec
 	spin_unlock(&section->lock);
 	return page;
 }
+*/
 
 /**
  * __sgx_alloc_epc_page() - Allocate an EPC page
@@ -540,6 +579,7 @@ static struct sgx_epc_page *__sgx_alloc_epc_page_from_section(struct sgx_epc_sec
  *   an EPC page,
  *   -errno on error
  */
+/*
 struct sgx_epc_page *__sgx_alloc_epc_page(void)
 {
 	struct sgx_epc_section *section;
@@ -556,6 +596,26 @@ struct sgx_epc_page *__sgx_alloc_epc_page(void)
 
 	return ERR_PTR(-ENOMEM);
 }
+*/
+
+struct sgx_epc_page *__sgx_alloc_epc_page(void)
+{
+	struct sgx_epc_page *epc_page;
+	epc_page =  vmalloc(sizeof(struct sgx_epc_page));
+	epc_page->flags = 0;
+	epc_page->owner = NULL;
+	struct page *page = alloc_page(GFP_KERNEL);
+
+	if (!page) {
+    	return ERR_PTR(-ENOMEM);
+	}
+
+	epc_page->pfn = page_to_pfn(page);
+	spin_lock(&sgx_page_pool_lock);
+	list_add_tail(&epc_page->list, &sgx_page_pool);
+	spin_unlock(&sgx_page_pool_lock);
+	return epc_page;
+}
 
 /**
  * sgx_mark_page_reclaimable() - Mark a page as reclaimable
@@ -564,6 +624,7 @@ struct sgx_epc_page *__sgx_alloc_epc_page(void)
  * Mark a page as reclaimable and add it to the active page list. Pages
  * are automatically removed from the active list when freed.
  */
+/*
 void sgx_mark_page_reclaimable(struct sgx_epc_page *page)
 {
 	spin_lock(&sgx_reclaimer_lock);
@@ -571,6 +632,7 @@ void sgx_mark_page_reclaimable(struct sgx_epc_page *page)
 	list_add_tail(&page->list, &sgx_active_page_list);
 	spin_unlock(&sgx_reclaimer_lock);
 }
+*/
 
 /**
  * sgx_unmark_page_reclaimable() - Remove a page from the reclaim list
@@ -582,11 +644,12 @@ void sgx_mark_page_reclaimable(struct sgx_epc_page *page)
  *   0 on success,
  *   -EBUSY if the page is in the process of being reclaimed
  */
+/*
 int sgx_unmark_page_reclaimable(struct sgx_epc_page *page)
 {
 	spin_lock(&sgx_reclaimer_lock);
-	if (page->flags & SGX_EPC_PAGE_RECLAIMER_TRACKED) {
-		/* The page is being reclaimed. */
+	if (page->flags & SGX_EPC_PAGE_RECLAIMER_TRACKED) {*/
+		/* The page is being reclaimed. *//*
 		if (list_empty(&page->list)) {
 			spin_unlock(&sgx_reclaimer_lock);
 			return -EBUSY;
@@ -599,7 +662,7 @@ int sgx_unmark_page_reclaimable(struct sgx_epc_page *page)
 
 	return 0;
 }
-
+*/
 /**
  * sgx_alloc_epc_page() - Allocate an EPC page
  * @owner:	the owner of the EPC page
@@ -641,12 +704,14 @@ struct sgx_epc_page *sgx_alloc_epc_page(void *owner, bool reclaim)
 			break;
 		}
 
-		sgx_reclaim_pages();
-		cond_resched();
+		//sgx_reclaim_pages();
+		//cond_resched();
 	}
 
+	/*
 	if (sgx_should_reclaim(SGX_NR_LOW_PAGES))
 		wake_up(&ksgxd_waitq);
+	*/
 
 	return page;
 }
@@ -657,6 +722,7 @@ struct sgx_epc_page *sgx_alloc_epc_page(void *owner, bool reclaim)
  *
  * Call EREMOVE for an EPC page and insert it back to the list of free pages.
  */
+/*
 void sgx_free_epc_page(struct sgx_epc_page *page)
 {
 	struct sgx_epc_section *section = &sgx_epc_sections[page->section];
@@ -673,7 +739,30 @@ void sgx_free_epc_page(struct sgx_epc_page *page)
 	section->free_cnt++;
 	spin_unlock(&section->lock);
 }
+*/
 
+/**
+ * sgx_free_epc_page() - Free an EPC page
+ * @page:	an EPC page
+ *
+ * Call EREMOVE for an EPC page and insert it back to the list of free pages.
+ */
+void sgx_free_epc_page(struct sgx_epc_page *page)
+{
+	int ret;
+
+	WARN_ON_ONCE(page->flags & SGX_EPC_PAGE_RECLAIMER_TRACKED);
+
+	ret = __eremove((void *)sgx_get_epc_phys_addr(page));
+	if (WARN_ONCE(ret, "EREMOVE returned %d (0x%x)", ret, ret))
+		return;
+
+	spin_lock(&sgx_page_pool_lock);
+	list_del_init(&page->list);
+	spin_unlock(&sgx_page_pool_lock);
+}
+
+/*
 static bool __init sgx_setup_epc_section(u64 phys_addr, u64 size,
 					 unsigned long index,
 					 struct sgx_epc_section *section)
@@ -706,18 +795,21 @@ static bool __init sgx_setup_epc_section(u64 phys_addr, u64 size,
 	section->free_cnt = nr_pages;
 	return true;
 }
+*/
 
 /**
  * A section metric is concatenated in a way that @low bits 12-31 define the
  * bits 12-31 of the metric and @high bits 0-19 define the bits 32-51 of the
  * metric.
  */
+/*
 static inline u64 __init sgx_calc_section_metric(u64 low, u64 high)
 {
 	return (low & GENMASK_ULL(31, 12)) +
 	       ((high & GENMASK_ULL(19, 0)) << 32);
 }
-
+*/
+/*
 static bool __init sgx_page_cache_init(void)
 {
 	u32 eax, ebx, ecx, edx, type;
@@ -756,17 +848,17 @@ static bool __init sgx_page_cache_init(void)
 
 	return true;
 }
+*/
 
 static int __init sgx_init(void)
 {
 	int ret;
-	int i;
-
-	if (!detect_sgx(&boot_cpu_data))
+	//int i;
+	if (!detect_svsm())
 		return -ENODEV;
 
-	if (!sgx_page_cache_init())
-		return -EFAULT;
+	//if (!sgx_page_cache_init())
+	//	return -EFAULT;
 #ifdef HAVE_MMPUT_ASYNC
 	k_mmput_async = mmput_async;
 #else
@@ -780,17 +872,18 @@ static int __init sgx_init(void)
 		pr_err("mmput_async support missing from kernel.\n");
 		return -EFAULT;
 	}
-	if (!sgx_page_reclaimer_init())
-		goto err_page_cache;
+	//if (!sgx_page_reclaimer_init())
+	//	goto err_page_cache;
 
 	ret = sgx_drv_init();
 	if (ret)
-		goto err_kthread;
+		return -EFAULT;
+		//goto err_kthread;
 
 	pr_info(DRV_DESCRIPTION " v" DRV_VERSION "\n");
-
 	return 0;
 
+/*
 err_kthread:
 	kthread_stop(ksgxd_tsk);
 
@@ -800,17 +893,33 @@ err_page_cache:
 		memunmap(sgx_epc_sections[i].virt_addr);
 	}
 	return -EFAULT;
+*/	
 }
 module_init(sgx_init);
 
 static void __exit sgx_exit(void)
 {
-	int i;
+	//int i;
 	sgx_drv_exit();
-	kthread_stop(ksgxd_tsk);
+	//kthread_stop(ksgxd_tsk);
+	struct sgx_epc_page *epc_page;
+
+	spin_lock(&sgx_page_pool_lock);
+	while(!list_empty(&sgx_page_pool)) {
+		epc_page = list_first_entry(&sgx_page_pool, struct sgx_epc_page, list);
+		list_del_init(&epc_page->list);
+		int ret = __eremove((void *)sgx_get_epc_phys_addr(epc_page));
+		if (!ret)
+			pr_err("Page with pfn 0x%lx cannot be removed when module exits, memory leak happens", epc_page->pfn);
+		vfree(epc_page);
+	}
+	spin_unlock(&sgx_page_pool_lock);
+	pr_info(DRV_DESCRIPTION " v" DRV_VERSION " removed\n");
+	/*
 	for (i = 0; i < sgx_nr_epc_sections; i++) {
 		vfree(sgx_epc_sections[i].pages);
 		memunmap(sgx_epc_sections[i].virt_addr);
 	}
+	*/
 }
 module_exit(sgx_exit);

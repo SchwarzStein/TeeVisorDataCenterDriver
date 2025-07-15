@@ -41,7 +41,7 @@ struct sgx_enclave_create  {
  * struct sgx_enclave_add_pages - parameter structure for the
  *                                %SGX_IOC_ENCLAVE_ADD_PAGE ioctl
  * @src:	start address for the page data
- * @offset:	starting page offset
+ * @dst:    start address of the dst addr
  * @length:	length of the data (multiple of the page size)
  * @secinfo:	address for the SECINFO data
  * @flags:	page control flags
@@ -49,7 +49,7 @@ struct sgx_enclave_create  {
  */
 struct sgx_enclave_add_pages {
 	__u64 src;
-	__u64 offset;
+	__u64 dst;
 	__u64 length;
 	__u64 secinfo;
 	__u64 flags;

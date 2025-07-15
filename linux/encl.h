@@ -43,6 +43,7 @@ enum sgx_encl_flags {
 	SGX_ENCL_DEBUG		= BIT(1),
 	SGX_ENCL_CREATED	= BIT(2),
 	SGX_ENCL_INITIALIZED	= BIT(3),
+	SGX_ENCL_RUNTIME	= BIT(4),
 };
 
 struct sgx_encl_mm {
@@ -58,6 +59,8 @@ struct sgx_encl_mm {
 struct sgx_encl {
 	unsigned long base;
 	unsigned long size;
+	unsigned long runtime_base;
+	unsigned long runtime_size;
 	unsigned long flags;
 	unsigned int page_cnt;
 	unsigned int secs_child_cnt;
@@ -72,9 +75,9 @@ struct sgx_encl {
 	unsigned long attributes_mask;
 
 	cpumask_t cpumask;
-	struct file *backing;
+	//struct file *backing;
 	struct kref refcount;
-	struct list_head va_pages;
+	//struct list_head va_pages;
 	unsigned long mm_list_version;
 	struct list_head mm_list;
 	spinlock_t mm_lock;
@@ -117,15 +120,15 @@ int sgx_encl_may_map(struct sgx_encl *encl, unsigned long start,
 
 void sgx_encl_release(struct kref *ref);
 int sgx_encl_mm_add(struct sgx_encl *encl, struct mm_struct *mm);
-int sgx_encl_get_backing(struct sgx_encl *encl, unsigned long page_index,
-			 struct sgx_backing *backing);
-void sgx_encl_put_backing(struct sgx_backing *backing, bool do_write);
+//int sgx_encl_get_backing(struct sgx_encl *encl, unsigned long page_index,
+//			 struct sgx_backing *backing);
+//void sgx_encl_put_backing(struct sgx_backing *backing, bool do_write);
 int sgx_encl_test_and_clear_young(struct mm_struct *mm,
 				  struct sgx_encl_page *page);
 
-struct sgx_epc_page *sgx_alloc_va_page(void);
-unsigned int sgx_alloc_va_slot(struct sgx_va_page *va_page);
-void sgx_free_va_slot(struct sgx_va_page *va_page, unsigned int offset);
-bool sgx_va_page_full(struct sgx_va_page *va_page);
+//struct sgx_epc_page *sgx_alloc_va_page(void);
+//unsigned int sgx_alloc_va_slot(struct sgx_va_page *va_page);
+//void sgx_free_va_slot(struct sgx_va_page *va_page, unsigned int offset);
+//bool sgx_va_page_full(struct sgx_va_page *va_page);
 
 #endif /* _X86_ENCL_H */

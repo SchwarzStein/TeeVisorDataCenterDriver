@@ -50,7 +50,7 @@ enum sgx_miscselect {
 	SGX_MISC_EXINFO		= BIT(0),
 };
 
-#define SGX_MISC_RESERVED_MASK	GENMASK_ULL(63, 1)
+#define SGX_MISC_RESERVED_MASK	GENMASK_ULL(31, 1)
 
 #define SGX_SSA_GPRS_SIZE		184
 #define SGX_SSA_MISC_EXINFO_SIZE	16
@@ -74,10 +74,13 @@ enum sgx_attribute {
 	SGX_ATTR_PROVISIONKEY	= BIT(4),
 	SGX_ATTR_EINITTOKENKEY	= BIT(5),
 	SGX_ATTR_KSS		= BIT(7),
+	SGX_ATTR_AEXNOTIFY = BIT(10),
+	SGX_ATTR_RUNTIME = BIT(11),
+	SGX_ATTR_CLONE = BIT(12),
 };
 
-#define SGX_ATTR_RESERVED_MASK	(BIT_ULL(3) | BIT_ULL(6) | GENMASK_ULL(63, 8))
-
+//#define SGX_ATTR_RESERVED_MASK	(BIT_ULL(3) | BIT_ULL(6) | GENMASK_ULL(63, 8))
+#define SGX_ATTR_RESERVED_MASK	(BIT_ULL(3) | BIT_ULL(6) | GENMASK_ULL(63, 13))
 /**
  * struct sgx_secs - SGX Enclave Control Structure (SECS)
  * @size:		size of the address space
@@ -115,7 +118,9 @@ struct sgx_secs {
 	u16 isv_prod_id;
 	u16 isv_svn;
 	u16 config_svn;
-	u8  reserved4[3834];
+	u64 runtime_size;
+    u64 runtime_base;
+	u8  reserved4[3818];
 } __packed;
 
 /**
