@@ -1,0 +1,19 @@
+#!/usr/bin/env bats
+
+@test "teevisor open" {
+    run gcc open.c -o test_open
+    run ./test_open
+    [ "$status" -eq 0 ]
+    [ "$output" != "Failed to open /dev/teevisor" ]
+}
+
+@test "teevisor mmap" {
+    run gcc mmap.c -o test_mmap
+    run ./test_mmap
+    [ "$status" -eq 0 ]
+    [ "$output" = "fd is mapped to 0x0 - 0x200000" ]
+}
+
+teardown() {
+  rm test_*
+}
