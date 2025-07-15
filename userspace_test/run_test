@@ -14,6 +14,13 @@
     [ "$output" = "fd is mapped to 0x0 - 0x200000" ]
 }
 
+@test "teevisor ecreate normal" {
+    run gcc ecreate_normal.c -o test_ecreate_normal
+    run ./test_ecreate_normal
+    echo "ret value is $status"
+    [ "$status" -eq 0 ]
+}
+
 teardown() {
   rm test_*
 }
