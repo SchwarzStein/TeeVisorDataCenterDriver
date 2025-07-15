@@ -93,6 +93,7 @@ static int sgx_encl_create(struct sgx_encl *encl, struct sgx_secs *secs)
 	*/
 	secs_epc = sgx_alloc_epc_page(&encl->secs, true);
 	if (IS_ERR(secs_epc)) {
+		pr_err("sgx_alloc_epc_page error\n");
 		ret = PTR_ERR(secs_epc);
 		goto err_out_backing;
 	}
@@ -103,11 +104,11 @@ static int sgx_encl_create(struct sgx_encl *encl, struct sgx_secs *secs)
 
 	pginfo->addr = 0;
 	pginfo->contents = (unsigned long)virt_to_phys(secs);
-	pginfo->metadata = (unsigned long)secinfo;
+	pginfo->metadata = (unsigned long)virt_to_phys(secinfo);
 	pginfo->secs = 0;
 	memset(secinfo, 0, sizeof(secinfo));
 
-	ret = __ecreate(virt_to_phys(pginfo), (void *)sgx_get_epc_phys_addr(secs_epc));
+	ret = __ecreate(virt_to_phys(pginfo), sgx_get_epc_phys_addr(secs_epc));
 
 	kfree(pginfo);
 	kfree(secinfo);

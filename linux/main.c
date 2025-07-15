@@ -745,7 +745,7 @@ void sgx_free_epc_page(struct sgx_epc_page *page)
  * sgx_free_epc_page() - Free an EPC page
  * @page:	an EPC page
  *
- * Call EREMOVE for an EPC page and insert it back to the list of free pages.
+ * Call EREMOVE for an EPC page
  */
 void sgx_free_epc_page(struct sgx_epc_page *page)
 {
@@ -753,7 +753,7 @@ void sgx_free_epc_page(struct sgx_epc_page *page)
 
 	WARN_ON_ONCE(page->flags & SGX_EPC_PAGE_RECLAIMER_TRACKED);
 
-	ret = __eremove((void *)sgx_get_epc_phys_addr(page));
+	ret = __eremove(sgx_get_epc_phys_addr(page));
 	if (WARN_ONCE(ret, "EREMOVE returned %d (0x%x)", ret, ret))
 		return;
 
@@ -908,7 +908,8 @@ static void __exit sgx_exit(void)
 	while(!list_empty(&sgx_page_pool)) {
 		epc_page = list_first_entry(&sgx_page_pool, struct sgx_epc_page, list);
 		list_del_init(&epc_page->list);
-		int ret = __eremove((void *)sgx_get_epc_phys_addr(epc_page));
+		int ret = __eremove(sgx_get_epc_phys_addr(epc_page));
+		pr_info("remove page %lx when module exit\n", sgx_get_epc_phys_addr(epc_page));
 		if (!ret)
 			pr_err("Page with pfn 0x%lx cannot be removed when module exits, memory leak happens", epc_page->pfn);
 		vfree(epc_page);
