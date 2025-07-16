@@ -21,6 +21,20 @@
     [ "$status" -eq 0 ]
 }
 
+@test "teevisor ecreate runtime" {
+    run gcc ecreate_runtime.c -o test_ecreate_runtime
+    run ./test_ecreate_runtime
+    echo "ret value is $status"
+    [ "$status" -eq 0 ]
+}
+
+@test "teevisor eadd eextend normal" {
+    run gcc eadd_eextend_normal.c -o test_eadd_eextend_normal
+    run ./test_eadd_eextend_normal
+    echo "ret value is $status"
+    [ "$status" -eq 0 ]
+}
+
 teardown() {
   rm test_*
 }
