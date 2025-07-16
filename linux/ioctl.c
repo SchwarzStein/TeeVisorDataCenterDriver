@@ -256,7 +256,7 @@ static int __sgx_encl_add_page(struct sgx_encl *encl,
 			       struct sgx_epc_page *epc_page,
 			       struct sgx_secinfo *secinfo, unsigned long src)
 {
-	struct sgx_pageinfo pginfo;
+	struct sgx_pageinfo *pginfo;
 	struct vm_area_struct *vma;
 	struct page *src_page;
 	int ret;
@@ -273,14 +273,16 @@ static int __sgx_encl_add_page(struct sgx_encl *encl,
 	if (ret < 1)
 		return -EFAULT;
 
-	pginfo.secs = (unsigned long)sgx_get_epc_phys_addr(encl->secs.epc_page);
-	pginfo.addr = encl_page->desc & PAGE_MASK;
-	pginfo.metadata = (unsigned long)secinfo;
-	pginfo.contents = (unsigned long)kmap_atomic(src_page);
+	pginfo = kmalloc(sizeof(struct sgx_pageinfo) ,GFP_KERNEL);
+	pginfo->secs = (unsigned long)sgx_get_epc_phys_addr(encl->secs.epc_page);
+	pginfo->addr = encl_page->desc & PAGE_MASK;
+	pginfo->metadata = virt_to_phys(secinfo);
+	pginfo->contents = (unsigned long)virt_to_phys(kmap_atomic(src_page));
 
-	ret = __eadd(&pginfo, (void *)sgx_get_epc_phys_addr(epc_page));
+	ret = __eadd(virt_to_phys(pginfo), sgx_get_epc_phys_addr(epc_page));
 
-	kunmap_atomic((void *)pginfo.contents);
+	kunmap_atomic((void *)pginfo->contents);
+	kfree(pginfo);
 	put_page(src_page);
 
 	return ret ? -EIO : 0;
@@ -298,8 +300,8 @@ static int __sgx_encl_extend(struct sgx_encl *encl,
 	int ret;
 
 	for (offset = 0; offset < PAGE_SIZE; offset += SGX_EEXTEND_BLOCK_SIZE) {
-		ret = __eextend((void *)sgx_get_epc_phys_addr(encl->secs.epc_page),
-				(void *)sgx_get_epc_phys_addr(epc_page) + offset);
+		ret = __eextend(sgx_get_epc_phys_addr(encl->secs.epc_page),
+				sgx_get_epc_phys_addr(epc_page) + offset);
 		if (ret) {
 			if (encls_failed(ret))
 				ENCLS_WARN(ret, "EEXTEND");

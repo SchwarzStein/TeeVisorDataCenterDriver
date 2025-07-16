@@ -185,14 +185,30 @@ static inline int __ecreate(struct sgx_pageinfo *pginfo, void *secs)
 }
 */
 
+/*
 static inline int __eextend(void *secs, void *addr)
 {
 	return __encls_2(EEXTEND, secs, addr);
 }
+*/
 
+static inline int __eextend(u64 secs, u64 addr)
+{
+	//pr_info("eextend addr 0x%llx\n", addr);
+	return snp_sgx_encls(SVSM_ENCL_EEXTEND, secs, addr, 0);
+}
+
+/*
 static inline int __eadd(struct sgx_pageinfo *pginfo, void *addr)
 {
 	return __encls_2(EADD, pginfo, addr);
+}
+*/
+
+static inline int __eadd(u64 pginfo, u64 addr)
+{
+	//pr_info("eadd addr 0x%llx\n", addr);
+	return snp_sgx_encls(SVSM_ENCL_EADD, pginfo, addr, 0);
 }
 
 static inline int __einit(void *sigstruct, void *token, void *secs)
@@ -202,6 +218,7 @@ static inline int __einit(void *sigstruct, void *token, void *secs)
 
 static inline int __eremove(u64 addr)
 {
+	//pr_info("eremove addr 0x%llx\n", addr);
 	return snp_sgx_encls(SVSM_ENCL_EREMOVE, addr, 0, 0);
 }
 
