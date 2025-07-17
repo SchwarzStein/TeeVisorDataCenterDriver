@@ -35,6 +35,14 @@
     [ "$status" -eq 0 ]
 }
 
+@test "teevisor einit normal" {
+    run gcc einit_normal.c -o test_einit_normal
+    run ./test_einit_normal
+    echo "ret value is $status"
+    echo "$output"
+    [ "$status" -eq 0 ]
+}
+
 teardown() {
   rm test_*
 }
