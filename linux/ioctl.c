@@ -559,8 +559,8 @@ static int sgx_encl_init(struct sgx_encl *encl, struct sgx_sigstruct *sigstruct,
 			 void *token)
 {
 	u64 mrsigner[4];
-	int i, j, k;
-	void *addr;
+	int i, j;
+	u64 addr;
 	int ret;
 
 	/*
@@ -604,14 +604,16 @@ static int sgx_encl_init(struct sgx_encl *encl, struct sgx_sigstruct *sigstruct,
 	 */
 	for (i = 0; i < SGX_EINIT_SLEEP_COUNT; i++) {
 		for (j = 0; j < SGX_EINIT_SPIN_COUNT; j++) {
-			addr = (void *)sgx_get_epc_phys_addr(encl->secs.epc_page);
+			addr = sgx_get_epc_phys_addr(encl->secs.epc_page);
 
 			preempt_disable();
 
+			/*
 			for (k = 0; k < 4; k++)
 				wrmsrl(MSR_IA32_SGXLEPUBKEYHASH0 + k, mrsigner[k]);
+			*/
 
-			ret = __einit(sigstruct, token, addr);
+			ret = __einit(virt_to_phys(sigstruct), virt_to_phys(token), addr);
 
 			preempt_enable();
 

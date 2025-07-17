@@ -211,9 +211,17 @@ static inline int __eadd(u64 pginfo, u64 addr)
 	return snp_sgx_encls(SVSM_ENCL_EADD, pginfo, addr, 0);
 }
 
+/*
 static inline int __einit(void *sigstruct, void *token, void *secs)
 {
 	return __encls_ret_3(EINIT, sigstruct, secs, token);
+}
+*/
+
+static inline int __einit(u64 sigstruct, u64 token, u64 secs)
+{
+	//pr_info("einit secs 0x%llx\n", secs);
+	return snp_sgx_encls(SVSM_ENCL_EINIT, sigstruct, secs, token);
 }
 
 static inline int __eremove(u64 addr)
