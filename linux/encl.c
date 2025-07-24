@@ -96,6 +96,63 @@ static struct sgx_epc_page *sgx_encl_eldu(struct sgx_encl_page *encl_page,
 	return epc_page;
 }
 */
+int sgx_encl_esync(struct sgx_encl *encl, u64 paddr, u64 vaddr, bool read, bool write, bool execute)
+{
+	struct sgx_pageinfo *pginfo;
+	struct sgx_secinfo *secinfo;
+	int ret;
+
+	pginfo = kmalloc(sizeof(struct sgx_pageinfo) ,GFP_KERNEL);
+	secinfo = kzalloc(sizeof(struct sgx_secinfo), GFP_KERNEL);
+
+	pginfo->secs = (unsigned long)sgx_get_epc_phys_addr(encl->secs.epc_page);
+	pginfo->addr = vaddr;
+	pginfo->metadata = virt_to_phys(secinfo);
+	pginfo->contents = paddr;
+
+	secinfo->flags = SGX_SECINFO_SYNC;
+
+	if (read) {
+		secinfo->flags |= SGX_SECINFO_R;
+	}
+
+	if (write) {
+		secinfo->flags |= SGX_SECINFO_W;
+	}
+
+	if (execute) {
+		secinfo->flags |= SGX_SECINFO_X;
+	}
+
+	ret = __esync(virt_to_phys(pginfo));
+
+	kfree(pginfo);
+	kfree(secinfo);
+
+	return ret ? -EIO : 0;
+}
+
+int sgx_encl_eunsync(struct sgx_encl *encl, u64 paddr, u64 vaddr)
+{
+	struct sgx_pageinfo *pginfo;
+	struct sgx_secinfo *secinfo;
+	int ret;
+
+	pginfo = kmalloc(sizeof(struct sgx_pageinfo) ,GFP_KERNEL);
+	secinfo = kzalloc(sizeof(struct sgx_secinfo), GFP_KERNEL);
+
+	pginfo->secs = (unsigned long)sgx_get_epc_phys_addr(encl->secs.epc_page);
+	pginfo->addr = vaddr;
+	pginfo->metadata = virt_to_phys(secinfo);
+	pginfo->contents = paddr;
+
+	ret = __esync(virt_to_phys(pginfo));
+
+	kfree(pginfo);
+	kfree(secinfo);
+
+	return ret ? -EIO : 0;
+}
 
 static struct sgx_encl_page *sgx_get_encl_page(struct sgx_encl *encl,
 						unsigned long addr,
@@ -172,6 +229,131 @@ static struct sgx_encl_page *sgx_encl_load_page(struct sgx_encl *encl,
 }
 */
 
+/**
+ * sgx_encl_eaug_page() - Dynamically add page to initialized enclave
+ * @vma:	VMA obtained from fault info from where page is accessed
+ * @encl:	enclave accessing the page
+ * @addr:	address that triggered the page fault
+ *
+ * When an initialized enclave accesses a page with no backing EPC page
+ * on a SGX2 system then the EPC can be added dynamically via the SGX2
+ * ENCLS[EAUG] instruction.
+ *
+ * Returns: Appropriate vm_fault_t: VM_FAULT_NOPAGE when PTE was installed
+ * successfully, VM_FAULT_SIGBUS or VM_FAULT_OOM as error otherwise.
+ */
+static vm_fault_t sgx_encl_eaug_page(struct vm_area_struct *vma,
+				     struct sgx_encl *encl, unsigned long addr)
+{
+	vm_fault_t vmret = VM_FAULT_SIGBUS;
+	struct sgx_pageinfo *pginfo;
+	struct sgx_encl_page *encl_page;
+	struct sgx_epc_page *epc_page;
+	//struct sgx_va_page *va_page;
+	//unsigned long phys_addr;
+	u64 secinfo_flags;
+	int ret;
+
+	if (!test_bit(SGX_ENCL_INITIALIZED, &encl->flags))
+		return VM_FAULT_SIGBUS;
+
+	/*
+	 * Ignore internal permission checking for dynamically added pages.
+	 * They matter only for data added during the pre-initialization
+	 * phase. The enclave decides the permissions by the means of
+	 * EACCEPT, EACCEPTCOPY and EMODPE.
+	 */
+	secinfo_flags = SGX_SECINFO_R | SGX_SECINFO_W | SGX_SECINFO_X;
+	encl_page = sgx_encl_page_alloc(encl, addr - encl->base, secinfo_flags);
+	if (IS_ERR(encl_page))
+		return VM_FAULT_OOM;
+
+	mutex_lock(&encl->lock);
+
+	//epc_page = sgx_encl_load_secs(encl);
+	epc_page = encl->secs.epc_page;
+	if (IS_ERR(epc_page)) {
+		if (PTR_ERR(epc_page) == -EBUSY)
+			vmret = VM_FAULT_NOPAGE;
+		goto err_out_unlock;
+	}
+
+	epc_page = sgx_alloc_epc_page(encl_page, false);
+	if (IS_ERR(epc_page)) {
+		if (PTR_ERR(epc_page) == -EBUSY)
+			vmret =  VM_FAULT_NOPAGE;
+		goto err_out_unlock;
+	}
+
+	/*
+	va_page = sgx_encl_grow(encl, false);
+	if (IS_ERR(va_page)) {
+		if (PTR_ERR(va_page) == -EBUSY)
+			vmret = VM_FAULT_NOPAGE;
+		goto err_out_epc;
+	}
+
+	if (va_page)
+		list_add(&va_page->list, &encl->va_pages);
+	*/
+
+	ret = xa_insert(&encl->page_array, PFN_DOWN(encl_page->desc),
+			encl_page, GFP_KERNEL);
+	/*
+	 * If ret == -EBUSY then page was created in another flow while
+	 * running without encl->lock
+	 */
+	if (ret)
+		goto err_out_shrink;
+
+	pginfo = kzalloc(sizeof(struct sgx_pageinfo) ,GFP_KERNEL);
+	pginfo->secs = (unsigned long)sgx_get_epc_phys_addr(encl->secs.epc_page);
+	pginfo->addr = encl_page->desc & PAGE_MASK;
+	pginfo->metadata = 0;
+
+	ret = __eaug(virt_to_phys(pginfo), sgx_get_epc_phys_addr(epc_page));
+	if (ret)
+		goto err_out;
+
+	encl_page->encl = encl;
+	encl_page->epc_page = epc_page;
+	encl_page->type = SGX_PAGE_TYPE_REG;
+	encl->secs_child_cnt++;
+
+	//sgx_mark_page_reclaimable(encl_page->epc_page);
+
+	//phys_addr = sgx_get_epc_phys_addr(epc_page);
+	/*
+	 * Do not undo everything when creating PTE entry fails - next #PF
+	 * would find page ready for a PTE.
+	 */
+
+	/*
+	vmret = vmf_insert_pfn(vma, addr, PFN_DOWN(phys_addr));
+	if (vmret != VM_FAULT_NOPAGE) {
+		mutex_unlock(&encl->lock);
+		return VM_FAULT_SIGBUS;
+	}
+	*/
+	kfree(pginfo);
+	mutex_unlock(&encl->lock);
+	return VM_FAULT_NOPAGE;
+
+err_out:
+	kfree(pginfo);
+	xa_erase(&encl->page_array, PFN_DOWN(encl_page->desc));
+
+err_out_shrink:
+	//sgx_encl_shrink(encl, va_page);
+//err_out_epc:
+	sgx_free_epc_page(epc_page);
+err_out_unlock:
+	mutex_unlock(&encl->lock);
+	kfree(encl_page);
+
+	return vmret;
+}
+
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0))
 static vm_fault_t sgx_vma_fault(struct vm_fault *vmf)
 #elif (LINUX_VERSION_CODE >= KERNEL_VERSION(5,1,0))
@@ -188,7 +370,7 @@ static int sgx_vma_fault(struct vm_fault *vmf)
     #endif
 #endif
 {
-	//unsigned long addr = (unsigned long)vmf->address;
+	unsigned long addr = (unsigned long)vmf->address;
 	struct vm_area_struct *vma = vmf->vma;
 	//struct sgx_encl_page *entry;
 	//unsigned long phys_addr;
@@ -213,7 +395,15 @@ static int sgx_vma_fault(struct vm_fault *vmf)
 
 	mutex_lock(&encl->lock);
 
-	//EAUG should happen here.
+	/*
+	 * If the page is not added, try to call eaug.
+	 * Otherwise the page is tried to visit either from outside or
+	 * with wrong permission, just return an error.
+	 */
+	if (!xa_load(&encl->page_array, PFN_DOWN(addr)))
+		return sgx_encl_eaug_page(vma, encl, addr);
+	else 
+		ret = VM_FAULT_SIGBUS;
 	mutex_unlock(&encl->lock);
 	/*
 
@@ -503,12 +693,14 @@ void sgx_encl_release(struct kref *ref)
 	struct sgx_encl *encl = container_of(ref, struct sgx_encl, refcount);
 	//struct sgx_va_page *va_page;
 	struct sgx_encl_page *entry;
+	struct sgx_encl_sync_page *sync_entry;
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 20, 0))
 	struct radix_tree_iter iter;
 	void **slot;
 #else
 	unsigned long index;
 #endif
+	unsigned long sync_vfn;
 
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 20, 0))
 	radix_tree_for_each_slot(slot, &encl->page_tree, &iter, 0) {
@@ -537,6 +729,16 @@ void sgx_encl_release(struct kref *ref)
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0))
 	xa_destroy(&encl->page_array);
 #endif
+
+	xa_for_each(&encl->sync_array, sync_vfn, sync_entry) {
+		if (sgx_encl_eunsync(encl, sync_entry->paddr, sync_vfn << PAGE_SHIFT))
+			pr_err("eunsync in sgx release failed with vaddr:0x%lx, paddr:0x%llx\n"
+			, sync_vfn << PAGE_SHIFT, sync_entry->paddr);
+
+		encl->sync_page_cnt--;
+		kfree(sync_entry);
+	}
+	xa_destroy(&encl->sync_array);
 
 	if (!encl->secs_child_cnt && encl->secs.epc_page) {
 		sgx_free_epc_page(encl->secs.epc_page);
@@ -624,8 +826,34 @@ static void sgx_mmu_notifier_free(struct mmu_notifier *mn)
 }
 #endif
 
+static int sgx_mmu_notifier_invalidate(struct mmu_notifier *mn,
+				      const struct mmu_notifier_range *range)
+{
+	struct sgx_encl* encl;
+	struct mm_struct *mm;
+	unsigned long sync_vfn;
+	unsigned long start = PFN_DOWN(range->start);
+	// range is [start, end) but in the xa_for_each_range is [start, last]
+	unsigned long last = (range->end - 1) >> PAGE_SHIFT;
+
+	struct sgx_encl_sync_page *sync_entry;
+	struct sgx_encl_mm *encl_mm = container_of(mn, struct sgx_encl_mm, mmu_notifier);
+
+	encl = encl_mm->encl;
+	mm = encl_mm->mm;
+	mutex_lock(&encl->lock);
+	xa_for_each_range(&encl->sync_array, sync_vfn, sync_entry, start, last) {
+		sgx_encl_eunsync(encl, sync_entry->paddr, sync_vfn << PAGE_SHIFT);
+		xa_erase(&encl->sync_array, sync_vfn);
+	}
+	mutex_unlock(&encl->lock);
+
+	return 0;
+}
+
 static const struct mmu_notifier_ops sgx_mmu_notifier_ops = {
 	.release		= sgx_mmu_notifier_release,
+	.invalidate_range_start = sgx_mmu_notifier_invalidate,
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0))
 	.free_notifier		= sgx_mmu_notifier_free,
 #endif

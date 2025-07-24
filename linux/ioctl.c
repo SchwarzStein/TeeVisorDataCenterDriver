@@ -192,7 +192,7 @@ static long sgx_ioc_enclave_create(struct sgx_encl *encl, void __user *arg)
 	return ret;
 }
 
-static struct sgx_encl_page *sgx_encl_page_alloc(struct sgx_encl *encl,
+struct sgx_encl_page *sgx_encl_page_alloc(struct sgx_encl *encl,
 						 unsigned long dst,
 						 u64 secinfo_flags)
 {
@@ -277,11 +277,10 @@ static int __sgx_encl_add_page(struct sgx_encl *encl,
 	pginfo->secs = (unsigned long)sgx_get_epc_phys_addr(encl->secs.epc_page);
 	pginfo->addr = encl_page->desc & PAGE_MASK;
 	pginfo->metadata = virt_to_phys(secinfo);
-	pginfo->contents = (unsigned long)virt_to_phys(kmap_atomic(src_page));
+	pginfo->contents = (unsigned long)page_to_phys(src_page);
 
 	ret = __eadd(virt_to_phys(pginfo), sgx_get_epc_phys_addr(epc_page));
 
-	kunmap_atomic((void *)pginfo->contents);
 	kfree(pginfo);
 	put_page(src_page);
 
@@ -370,6 +369,14 @@ static int sgx_encl_add_page(struct sgx_encl *encl, unsigned long src,
 	if (ret)
 		goto err_out_unlock;
 
+	if (secinfo->flags & SGX_SECINFO_TCS) {
+		ret = xa_insert(&encl->tcs_array, PFN_DOWN(encl_page->desc),
+			encl_page, GFP_KERNEL);
+	}
+
+	if (ret)
+		goto err_out_unlock;
+
 	ret = __sgx_encl_add_page(encl, encl_page, epc_page, secinfo,
 				  src);
 	if (ret)
@@ -382,6 +389,7 @@ static int sgx_encl_add_page(struct sgx_encl *encl, unsigned long src,
 	 */
 	encl_page->encl = encl;
 	encl_page->epc_page = epc_page;
+	encl_page->type = (secinfo->flags & SGX_SECINFO_PAGE_TYPE_MASK) >> 8;
 	encl->secs_child_cnt++;
 
 	if (flags & SGX_PAGE_MEASURE) {
@@ -402,6 +410,8 @@ static int sgx_encl_add_page(struct sgx_encl *encl, unsigned long src,
 err_out:
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,20,0))
 	xa_erase(&encl->page_array, PFN_DOWN(encl_page->desc));
+	if (secinfo->flags & SGX_SECINFO_TCS)
+		xa_erase(&encl->tcs_array, PFN_DOWN(encl_page->desc));
 #else
 	radix_tree_delete(&encl_page->encl->page_tree,
 			  PFN_DOWN(encl_page->desc));

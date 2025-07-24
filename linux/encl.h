@@ -32,10 +32,15 @@
 
 struct sgx_encl_page {
 	unsigned long desc;
-	unsigned long vm_max_prot_bits;
+	unsigned long vm_max_prot_bits:8;
+	enum sgx_page_type type:16;
 	struct sgx_epc_page *epc_page;
 	struct sgx_encl *encl;
 	struct sgx_va_page *va_page;
+};
+
+struct sgx_encl_sync_page {
+	u64 paddr;
 };
 
 enum sgx_encl_flags {
@@ -64,9 +69,12 @@ struct sgx_encl {
 	unsigned long flags;
 	unsigned int page_cnt;
 	unsigned int secs_child_cnt;
+	unsigned int sync_page_cnt;
 	struct mutex lock;
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0))
 	struct xarray page_array;
+	struct xarray sync_array;
+	struct xarray tcs_array;
 #else
 	struct radix_tree_root page_tree;
 #endif
@@ -115,9 +123,24 @@ static inline int sgx_encl_find(struct mm_struct *mm, unsigned long addr,
 	return 0;
 }
 
+static inline bool vaddr_inside_enclave(struct sgx_encl *encl, unsigned long vaddr)
+{
+	if (vaddr >= encl->base && vaddr < (encl->base + encl->size))
+		return true;
+	
+	if (test_bit(SGX_ENCL_RUNTIME, &encl->flags) &&
+		(vaddr >= encl->runtime_base
+			&& vaddr < (encl->runtime_base + encl->runtime_size)))
+		return true;
+
+	return false;
+}
+
 int sgx_encl_may_map(struct sgx_encl *encl, unsigned long start,
 		     unsigned long end, unsigned long vm_flags);
-
+struct sgx_encl_page *sgx_encl_page_alloc(struct sgx_encl *encl,
+					  unsigned long offset,
+					  u64 secinfo_flags);
 void sgx_encl_release(struct kref *ref);
 int sgx_encl_mm_add(struct sgx_encl *encl, struct mm_struct *mm);
 //int sgx_encl_get_backing(struct sgx_encl *encl, unsigned long page_index,
@@ -125,7 +148,9 @@ int sgx_encl_mm_add(struct sgx_encl *encl, struct mm_struct *mm);
 //void sgx_encl_put_backing(struct sgx_backing *backing, bool do_write);
 int sgx_encl_test_and_clear_young(struct mm_struct *mm,
 				  struct sgx_encl_page *page);
-
+int sgx_encl_esync(struct sgx_encl *encl, u64 paddr, u64 vaddr, 
+	bool read, bool write, bool execute);
+int sgx_encl_eunsync(struct sgx_encl *encl, u64 paddr, u64 vaddr);
 //struct sgx_epc_page *sgx_alloc_va_page(void);
 //unsigned int sgx_alloc_va_slot(struct sgx_va_page *va_page);
 //void sgx_free_va_slot(struct sgx_va_page *va_page, unsigned int offset);

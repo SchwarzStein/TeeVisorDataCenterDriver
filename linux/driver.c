@@ -34,6 +34,8 @@ static int sgx_open(struct inode *inode, struct file *file)
 	kref_init(&encl->refcount);
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0))
 	xa_init(&encl->page_array);
+	xa_init(&encl->sync_array);
+	xa_init(&encl->tcs_array);
 #else
 	INIT_RADIX_TREE(&encl->page_tree, GFP_KERNEL);
 #endif

@@ -178,6 +178,10 @@ static inline int __ecreate(u64 pginfo, u64 secs)
 	return snp_sgx_encls(SVSM_ENCL_ECREATE, pginfo, secs, 0);
 }
 
+static inline int __esync(u64 pginfo)
+{
+	return snp_sgx_encls(SVSM_ENCL_ESYNC, pginfo, 0, 0);
+}
 /*
 static inline int __ecreate(struct sgx_pageinfo *pginfo, void *secs)
 {
@@ -209,6 +213,12 @@ static inline int __eadd(u64 pginfo, u64 addr)
 {
 	//pr_info("eadd addr 0x%llx\n", addr);
 	return snp_sgx_encls(SVSM_ENCL_EADD, pginfo, addr, 0);
+}
+
+static inline int __eaug(u64 pginfo, u64 addr)
+{
+	//pr_info("eadd addr 0x%llx\n", addr);
+	return snp_sgx_encls(SVSM_ENCL_EAUG, pginfo, addr, 0);
 }
 
 /*

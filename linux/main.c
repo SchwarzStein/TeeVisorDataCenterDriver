@@ -11,9 +11,12 @@
 #include <linux/sched/signal.h>
 #include <linux/slab.h>
 #include <linux/mm.h>
+#include <asm/mce.h>
+#include <linux/notifier.h>
 #include <asm/sev.h>
 #include "driver.h"
 #include "encl.h"
+#include "enclu.h"
 #include "encls.h"
 
 #include <linux/module.h>
@@ -27,11 +30,11 @@
 #define FEAT_CTL_LOCKED FEATURE_CONTROL_LOCKED
 #endif
 
-static void (*k_mmput_async)(struct mm_struct* mm);
+static void (*k_mmput_async)(struct mm_struct *mm);
 
-//struct sgx_epc_section sgx_epc_sections[SGX_MAX_EPC_SECTIONS];
-//static int sgx_nr_epc_sections;
-//static struct task_struct *ksgxd_tsk;
+// struct sgx_epc_section sgx_epc_sections[SGX_MAX_EPC_SECTIONS];
+// static int sgx_nr_epc_sections;
+// static struct task_struct *ksgxd_tsk;
 static DECLARE_WAIT_QUEUE_HEAD(ksgxd_waitq);
 
 /*
@@ -43,7 +46,9 @@ static LIST_HEAD(sgx_active_page_list);
 // This list is stores all the allocated page.
 static LIST_HEAD(sgx_page_pool);
 static DEFINE_SPINLOCK(sgx_page_pool_lock);
-//static DEFINE_SPINLOCK(sgx_reclaimer_lock);
+// static DEFINE_SPINLOCK(sgx_reclaimer_lock);
+
+static struct notifier_block die_notifier;
 
 /*
  * Reset dirty EPC pages to uninitialized state. Laundry can be left with SECS
@@ -97,18 +102,18 @@ static bool sgx_reclaimer_age(struct sgx_epc_page *epc_page)
 		if (!mmget_not_zero(encl_mm->mm))
 			continue;
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,0))
-                mmap_read_lock(encl_mm->mm);
+				mmap_read_lock(encl_mm->mm);
 #else
 		down_read(&encl_mm->mm->mmap_sem);
 #endif
 		ret = !sgx_encl_test_and_clear_young(encl_mm->mm, page);
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,0))
-                mmap_read_unlock(encl_mm->mm);
+				mmap_read_unlock(encl_mm->mm);
 #else
 		up_read(&encl_mm->mm->mmap_sem);
 #endif
 
-                k_mmput_async(encl_mm->mm);
+				k_mmput_async(encl_mm->mm);
 
 		if (!ret)
 			break;
@@ -137,42 +142,43 @@ static void sgx_reclaimer_block(struct sgx_epc_page *epc_page)
 	do {
 		mm_list_version = encl->mm_list_version;
 
-		*//* Pairs with smp_rmb() in sgx_encl_mm_add(). *//*
-		smp_rmb();
+		*/
+/* Pairs with smp_rmb() in sgx_encl_mm_add(). */ /*
+smp_rmb();
 
-		idx = srcu_read_lock(&encl->srcu);
+idx = srcu_read_lock(&encl->srcu);
 
-		list_for_each_entry_rcu(encl_mm, &encl->mm_list, list) {
-			if (!mmget_not_zero(encl_mm->mm))
-				continue;
+list_for_each_entry_rcu(encl_mm, &encl->mm_list, list) {
+   if (!mmget_not_zero(encl_mm->mm))
+	   continue;
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,0))
-			mmap_read_lock(encl_mm->mm);
+   mmap_read_lock(encl_mm->mm);
 #else
-			down_read(&encl_mm->mm->mmap_sem);
+   down_read(&encl_mm->mm->mmap_sem);
 #endif
 
-			ret = sgx_encl_find(encl_mm->mm, addr, &vma);
-			if (!ret && encl == vma->vm_private_data)
-				zap_vma_ptes(vma, addr, PAGE_SIZE);
+   ret = sgx_encl_find(encl_mm->mm, addr, &vma);
+   if (!ret && encl == vma->vm_private_data)
+	   zap_vma_ptes(vma, addr, PAGE_SIZE);
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,0))
-			mmap_read_unlock(encl_mm->mm);
+   mmap_read_unlock(encl_mm->mm);
 #else
-			up_read(&encl_mm->mm->mmap_sem);
+   up_read(&encl_mm->mm->mmap_sem);
 #endif
 
-                        k_mmput_async(encl_mm->mm);
-		}
+			   k_mmput_async(encl_mm->mm);
+}
 
-		srcu_read_unlock(&encl->srcu, idx);
-	} while (unlikely(encl->mm_list_version != mm_list_version));
+srcu_read_unlock(&encl->srcu, idx);
+} while (unlikely(encl->mm_list_version != mm_list_version));
 
-	mutex_lock(&encl->lock);
+mutex_lock(&encl->lock);
 
-	ret = __eblock(sgx_get_epc_virt_addr(epc_page));
-	if (encls_failed(ret))
-		ENCLS_WARN(ret, "EBLOCK");
+ret = __eblock(sgx_get_epc_virt_addr(epc_page));
+if (encls_failed(ret))
+ENCLS_WARN(ret, "EBLOCK");
 
-	mutex_unlock(&encl->lock);
+mutex_unlock(&encl->lock);
 }
 */
 
@@ -193,7 +199,7 @@ static int __sgx_encl_ewb(struct sgx_epc_page *epc_page, void *va_slot,
 	ret = __ewb(&pginfo, sgx_get_epc_virt_addr(epc_page), va_slot);
 
 	kunmap_atomic((void *)(unsigned long)(pginfo.metadata -
-					      backing->pcmd_offset));
+						  backing->pcmd_offset));
 	kunmap_atomic((void *)(unsigned long)pginfo.contents);
 
 	return ret;
@@ -213,27 +219,28 @@ static const cpumask_t *sgx_encl_ewb_cpumask(struct sgx_encl *encl)
 	struct sgx_encl_mm *encl_mm;
 	int idx;
 	*/
-	/*
-	 * Can race with sgx_encl_mm_add(), but ETRACK has already been
-	 * executed, which means that the CPUs running in the new mm will enter
-	 * into the enclave with a fresh epoch.
-	 *//*
-	cpumask_clear(cpumask);
+/*
+ * Can race with sgx_encl_mm_add(), but ETRACK has already been
+ * executed, which means that the CPUs running in the new mm will enter
+ * into the enclave with a fresh epoch.
+ */
+/*
+cpumask_clear(cpumask);
 
-	idx = srcu_read_lock(&encl->srcu);
+idx = srcu_read_lock(&encl->srcu);
 
-	list_for_each_entry_rcu(encl_mm, &encl->mm_list, list) {
-		if (!mmget_not_zero(encl_mm->mm))
-			continue;
+list_for_each_entry_rcu(encl_mm, &encl->mm_list, list) {
+ if (!mmget_not_zero(encl_mm->mm))
+	 continue;
 
-		cpumask_or(cpumask, cpumask, mm_cpumask(encl_mm->mm));
+ cpumask_or(cpumask, cpumask, mm_cpumask(encl_mm->mm));
 
-                k_mmput_async(encl_mm->mm);
-	}
+		 k_mmput_async(encl_mm->mm);
+}
 
-	srcu_read_unlock(&encl->srcu, idx);
+srcu_read_unlock(&encl->srcu, idx);
 
-	return cpumask;
+return cpumask;
 }
 */
 
@@ -277,28 +284,30 @@ static void sgx_encl_ewb(struct sgx_epc_page *epc_page,
 
 		ret = __sgx_encl_ewb(epc_page, va_slot, backing);
 		if (ret == SGX_NOT_TRACKED) {
-			*//*
-			 * Slow path, send IPIs to kick cpus out of the
-			 * enclave.  Note, it's imperative that the cpu
-			 * mask is generated *after* ETRACK, else we'll
-			 * miss cpus that entered the enclave between
-			 * generating the mask and incrementing epoch.
-			 *//*
-			on_each_cpu_mask(sgx_encl_ewb_cpumask(encl),
-					 sgx_ipi_cb, NULL, 1);
-			ret = __sgx_encl_ewb(epc_page, va_slot, backing);
-		}
-	}
+			*/
+/*
+ * Slow path, send IPIs to kick cpus out of the
+ * enclave.  Note, it's imperative that the cpu
+ * mask is generated *after* ETRACK, else we'll
+ * miss cpus that entered the enclave between
+ * generating the mask and incrementing epoch.
+ */
+/*
+on_each_cpu_mask(sgx_encl_ewb_cpumask(encl),
+	  sgx_ipi_cb, NULL, 1);
+ret = __sgx_encl_ewb(epc_page, va_slot, backing);
+}
+}
 
-	if (ret) {
-		if (encls_failed(ret))
-			ENCLS_WARN(ret, "EWB");
+if (ret) {
+if (encls_failed(ret))
+ENCLS_WARN(ret, "EWB");
 
-		sgx_free_va_slot(va_page, va_offset);
-	} else {
-		encl_page->desc |= va_offset;
-		encl_page->va_page = va_page;
-	}
+sgx_free_va_slot(va_page, va_offset);
+} else {
+encl_page->desc |= va_offset;
+encl_page->va_page = va_page;
+}
 }
 */
 
@@ -368,71 +377,71 @@ static void sgx_reclaim_pages(void)
 			break;
 
 		epc_page = list_first_entry(&sgx_active_page_list,
-					    struct sgx_epc_page, list);
+						struct sgx_epc_page, list);
 		list_del_init(&epc_page->list);
 		encl_page = epc_page->owner;
 
 		if (kref_get_unless_zero(&encl_page->encl->refcount) != 0)
 			chunk[cnt++] = epc_page;
 		else*/
-			/* The owner is freeing the page. No need to add the
-			 * page back to the list of reclaimable pages.
-			 */
-			/*epc_page->flags &= ~SGX_EPC_PAGE_RECLAIMER_TRACKED;
-	}
-	spin_unlock(&sgx_reclaimer_lock);
+/* The owner is freeing the page. No need to add the
+ * page back to the list of reclaimable pages.
+ */
+/*epc_page->flags &= ~SGX_EPC_PAGE_RECLAIMER_TRACKED;
+}
+spin_unlock(&sgx_reclaimer_lock);
 
-	for (i = 0; i < cnt; i++) {
-		epc_page = chunk[i];
-		encl_page = epc_page->owner;
+for (i = 0; i < cnt; i++) {
+epc_page = chunk[i];
+encl_page = epc_page->owner;
 
-		if (!sgx_reclaimer_age(epc_page))
-			goto skip;
+if (!sgx_reclaimer_age(epc_page))
+goto skip;
 
-		page_index = PFN_DOWN(encl_page->desc - encl_page->encl->base);
-		ret = sgx_encl_get_backing(encl_page->encl, page_index, &backing[i]);
-		if (ret)
-			goto skip;
+page_index = PFN_DOWN(encl_page->desc - encl_page->encl->base);
+ret = sgx_encl_get_backing(encl_page->encl, page_index, &backing[i]);
+if (ret)
+goto skip;
 
-		mutex_lock(&encl_page->encl->lock);
-		encl_page->desc |= SGX_ENCL_PAGE_BEING_RECLAIMED;
-		mutex_unlock(&encl_page->encl->lock);
-		continue;
+mutex_lock(&encl_page->encl->lock);
+encl_page->desc |= SGX_ENCL_PAGE_BEING_RECLAIMED;
+mutex_unlock(&encl_page->encl->lock);
+continue;
 
 skip:
-		spin_lock(&sgx_reclaimer_lock);
-		list_add_tail(&epc_page->list, &sgx_active_page_list);
-		spin_unlock(&sgx_reclaimer_lock);
+spin_lock(&sgx_reclaimer_lock);
+list_add_tail(&epc_page->list, &sgx_active_page_list);
+spin_unlock(&sgx_reclaimer_lock);
 
-		kref_put(&encl_page->encl->refcount, sgx_encl_release);
+kref_put(&encl_page->encl->refcount, sgx_encl_release);
 
-		chunk[i] = NULL;
-	}
+chunk[i] = NULL;
+}
 
-	for (i = 0; i < cnt; i++) {
-		epc_page = chunk[i];
-		if (epc_page)
-			sgx_reclaimer_block(epc_page);
-	}
+for (i = 0; i < cnt; i++) {
+epc_page = chunk[i];
+if (epc_page)
+sgx_reclaimer_block(epc_page);
+}
 
-	for (i = 0; i < cnt; i++) {
-		epc_page = chunk[i];
-		if (!epc_page)
-			continue;
+for (i = 0; i < cnt; i++) {
+epc_page = chunk[i];
+if (!epc_page)
+continue;
 
-		encl_page = epc_page->owner;
-		sgx_reclaimer_write(epc_page, &backing[i]);
-		sgx_encl_put_backing(&backing[i], true);
+encl_page = epc_page->owner;
+sgx_reclaimer_write(epc_page, &backing[i]);
+sgx_encl_put_backing(&backing[i], true);
 
-		kref_put(&encl_page->encl->refcount, sgx_encl_release);
-		epc_page->flags &= ~SGX_EPC_PAGE_RECLAIMER_TRACKED;
+kref_put(&encl_page->encl->refcount, sgx_encl_release);
+epc_page->flags &= ~SGX_EPC_PAGE_RECLAIMER_TRACKED;
 
-		section = &sgx_epc_sections[epc_page->section];
-		spin_lock(&section->lock);
-		list_add_tail(&epc_page->list, &section->page_list);
-		section->free_cnt++;
-		spin_unlock(&section->lock);
-	}
+section = &sgx_epc_sections[epc_page->section];
+spin_lock(&section->lock);
+list_add_tail(&epc_page->list, &section->page_list);
+section->free_cnt++;
+spin_unlock(&section->lock);
+}
 }
 */
 /*
@@ -452,7 +461,7 @@ static unsigned long sgx_nr_free_pages(void)
 static bool sgx_should_reclaim(unsigned long watermark)
 {
 	return sgx_nr_free_pages() < watermark &&
-	       !list_empty(&sgx_active_page_list);
+		   !list_empty(&sgx_active_page_list);
 }
 */
 
@@ -463,38 +472,38 @@ static int ksgxd(void *p)
 
 	set_freezable();
 	*/
-	/*
-	 * Sanitize pages in order to recover from kexec(). The 2nd pass is
-	 * required for SECS pages, whose child pages blocked EREMOVE.
-	 */
-	/*
-	for (i = 0; i < sgx_nr_epc_sections; i++)
-		sgx_sanitize_section(&sgx_epc_sections[i]);
+/*
+ * Sanitize pages in order to recover from kexec(). The 2nd pass is
+ * required for SECS pages, whose child pages blocked EREMOVE.
+ */
+/*
+for (i = 0; i < sgx_nr_epc_sections; i++)
+	sgx_sanitize_section(&sgx_epc_sections[i]);
 
-	for (i = 0; i < sgx_nr_epc_sections; i++) {
-		sgx_sanitize_section(&sgx_epc_sections[i]);
+for (i = 0; i < sgx_nr_epc_sections; i++) {
+	sgx_sanitize_section(&sgx_epc_sections[i]);
 
-		// Should never happen.
-		if (!list_empty(&sgx_epc_sections[i].init_laundry_list))
-			WARN(1, "EPC section %d has unsanitized pages.\n", i);
-	}
+	// Should never happen.
+	if (!list_empty(&sgx_epc_sections[i].init_laundry_list))
+		WARN(1, "EPC section %d has unsanitized pages.\n", i);
+}
 
 
-	while (!kthread_should_stop()) {
-		if (try_to_freeze())
-			continue;
+while (!kthread_should_stop()) {
+	if (try_to_freeze())
+		continue;
 
-		wait_event_freezable(ksgxd_waitq,
-				     kthread_should_stop() ||
-				     sgx_should_reclaim(SGX_NR_HIGH_PAGES));
+	wait_event_freezable(ksgxd_waitq,
+				 kthread_should_stop() ||
+				 sgx_should_reclaim(SGX_NR_HIGH_PAGES));
 
-		if (sgx_should_reclaim(SGX_NR_HIGH_PAGES))
-			sgx_reclaim_pages();
+	if (sgx_should_reclaim(SGX_NR_HIGH_PAGES))
+		sgx_reclaim_pages();
 
-		cond_resched();
-	}
+	cond_resched();
+}
 
-	return 0;
+return 0;
 }
 */
 
@@ -516,36 +525,36 @@ static bool __init sgx_page_reclaimer_init(void)
 // Based on arch/x86/kernel/cpu/intel.c
 static bool detect_sgx(struct cpuinfo_x86 *c)
 {
-    unsigned long long fc;
+	unsigned long long fc;
 
-    rdmsrl(MSR_IA32_FEAT_CTL, fc);
-    if (!(fc & FEAT_CTL_LOCKED)) {
-        pr_err_once("The feature control MSR is not locked\n");
-        return false;
-    }
+	rdmsrl(MSR_IA32_FEAT_CTL, fc);
+	if (!(fc & FEAT_CTL_LOCKED)) {
+		pr_err_once("The feature control MSR is not locked\n");
+		return false;
+	}
 
-    if (!(fc & FEAT_CTL_SGX_ENABLED)) {
-        pr_err_once("SGX is not enabled in IA32_FEATURE_CONTROL MSR\n");
-        return false;
-    }
+	if (!(fc & FEAT_CTL_SGX_ENABLED)) {
+		pr_err_once("SGX is not enabled in IA32_FEATURE_CONTROL MSR\n");
+		return false;
+	}
 
-    if (!cpu_has(c, X86_FEATURE_SGX)) {
-        pr_err_once("SGX1 instruction set is not supported\n");
-        return false;
-    }
+	if (!cpu_has(c, X86_FEATURE_SGX)) {
+		pr_err_once("SGX1 instruction set is not supported\n");
+		return false;
+	}
 
-    if (!(fc & FEAT_CTL_SGX_LC_ENABLED)) {
-        pr_err_once("Locked launch policy not supported\n");
-        return false;
-    }
+	if (!(fc & FEAT_CTL_SGX_LC_ENABLED)) {
+		pr_err_once("Locked launch policy not supported\n");
+		return false;
+	}
 
-    return true;
+	return true;
 }
 */
 
 static inline bool detect_svsm(void)
 {
-    return snp_vmpl > 0;
+	return snp_vmpl > 0;
 }
 
 /*
@@ -601,13 +610,14 @@ struct sgx_epc_page *__sgx_alloc_epc_page(void)
 struct sgx_epc_page *__sgx_alloc_epc_page(void)
 {
 	struct sgx_epc_page *epc_page;
-	epc_page =  vmalloc(sizeof(struct sgx_epc_page));
+	epc_page = vmalloc(sizeof(struct sgx_epc_page));
 	epc_page->flags = 0;
 	epc_page->owner = NULL;
 	struct page *page = alloc_page(GFP_KERNEL);
 
-	if (!page) {
-    	return ERR_PTR(-ENOMEM);
+	if (!page)
+	{
+		return ERR_PTR(-ENOMEM);
 	}
 
 	epc_page->pfn = page_to_pfn(page);
@@ -649,18 +659,18 @@ int sgx_unmark_page_reclaimable(struct sgx_epc_page *page)
 {
 	spin_lock(&sgx_reclaimer_lock);
 	if (page->flags & SGX_EPC_PAGE_RECLAIMER_TRACKED) {*/
-		/* The page is being reclaimed. *//*
-		if (list_empty(&page->list)) {
-			spin_unlock(&sgx_reclaimer_lock);
-			return -EBUSY;
-		}
+/* The page is being reclaimed. */ /*
+ if (list_empty(&page->list)) {
+	 spin_unlock(&sgx_reclaimer_lock);
+	 return -EBUSY;
+ }
 
-		list_del(&page->list);
-		page->flags &= ~SGX_EPC_PAGE_RECLAIMER_TRACKED;
-	}
-	spin_unlock(&sgx_reclaimer_lock);
+ list_del(&page->list);
+ page->flags &= ~SGX_EPC_PAGE_RECLAIMER_TRACKED;
+}
+spin_unlock(&sgx_reclaimer_lock);
 
-	return 0;
+return 0;
 }
 */
 /**
@@ -684,9 +694,11 @@ struct sgx_epc_page *sgx_alloc_epc_page(void *owner, bool reclaim)
 {
 	struct sgx_epc_page *page;
 
-	for ( ; ; ) {
+	for (;;)
+	{
 		page = __sgx_alloc_epc_page();
-		if (!IS_ERR(page)) {
+		if (!IS_ERR(page))
+		{
 			page->owner = owner;
 			break;
 		}
@@ -694,18 +706,20 @@ struct sgx_epc_page *sgx_alloc_epc_page(void *owner, bool reclaim)
 		if (list_empty(&sgx_active_page_list))
 			return ERR_PTR(-ENOMEM);
 
-		if (!reclaim) {
+		if (!reclaim)
+		{
 			page = ERR_PTR(-EBUSY);
 			break;
 		}
 
-		if (signal_pending(current)) {
+		if (signal_pending(current))
+		{
 			page = ERR_PTR(-ERESTARTSYS);
 			break;
 		}
 
-		//sgx_reclaim_pages();
-		//cond_resched();
+		// sgx_reclaim_pages();
+		// cond_resched();
 	}
 
 	/*
@@ -806,7 +820,7 @@ static bool __init sgx_setup_epc_section(u64 phys_addr, u64 size,
 static inline u64 __init sgx_calc_section_metric(u64 low, u64 high)
 {
 	return (low & GENMASK_ULL(31, 12)) +
-	       ((high & GENMASK_ULL(19, 0)) << 32);
+		   ((high & GENMASK_ULL(19, 0)) << 32);
 }
 */
 /*
@@ -850,62 +864,512 @@ static bool __init sgx_page_cache_init(void)
 }
 */
 
+static struct sgx_encl *get_encl_from_vaddr(unsigned long vaddr)
+{
+	struct vm_area_struct *vma;
+	struct mm_struct *mm;
+	struct task_struct *tsk;
+	struct sgx_encl *encl = NULL;
+	int ret;
+
+	tsk = current;
+	mm = tsk->mm;
+
+	ret = sgx_encl_find(mm, vaddr, &vma);
+
+	if (!ret)
+		encl = (struct sgx_encl *)vma->vm_private_data;
+
+	return encl;
+}
+
+static pte_t *vaddr_to_pte(unsigned long vaddr, struct mm_struct *mm)
+{
+	pgd_t *pgd;
+	pud_t *pud;
+	pmd_t *pmd;
+	pte_t *pte;
+	p4d_t *p4d;
+
+	pgd = pgd_offset(mm, vaddr);
+	if (pgd_none(*pgd))
+	{
+		pr_err("not mapped in pgd\n");
+		return NULL;
+	}
+
+	p4d = p4d_offset(pgd, vaddr);
+	if (p4d_none(*p4d))
+	{
+		pr_err("not mapped in p4d\n");
+		return NULL;
+	}
+
+	pud = pud_offset(p4d, vaddr);
+	if (pud_none(*pud))
+	{
+		pr_err("not mapped in pud\n");
+		return NULL;
+	}
+
+	pmd = pmd_offset(pud, vaddr);
+	if (pmd_none(*pmd))
+	{
+		pr_err("not mapped in pmd\n");
+		return NULL;
+	}
+
+	if (pmd_trans_huge(*pmd))
+	{
+		pr_err("hugepage is currently nosupported in pmd\n");
+		return NULL;
+	}
+
+	pte = pte_offset_kernel(pmd, vaddr);
+	if (pte_none(*pte))
+	{
+		pr_err("not mapped in pte\n");
+		return NULL;
+	}
+
+	return pte;
+}
+
+static void handle_pf(struct pt_regs *regs,
+					  unsigned long error_code,
+					  unsigned long address,
+					  struct sgx_encl *encl)
+{
+	struct vm_area_struct *vma;
+	struct task_struct *tsk;
+	struct mm_struct *mm;
+	struct sgx_encl_sync_page *sync_entry;
+	vm_fault_t fault;
+	unsigned int flags = FAULT_FLAG_DEFAULT;
+	struct page *page = NULL;
+	pte_t *pte;
+	u64 paddr;
+	int ret;
+
+	tsk = current;
+	mm = tsk->mm;
+
+	if (error_code & X86_PF_WRITE)
+		flags |= FAULT_FLAG_WRITE;
+	if (error_code & X86_PF_INSTR)
+		flags |= FAULT_FLAG_INSTRUCTION;
+
+	flags |= FAULT_FLAG_USER;
+
+retry:
+	down_read(&mm->mmap_lock);
+	vma = vma_lookup(mm, address);
+	if (!vma)
+	{	
+		force_sig(SIGSEGV);
+		//force_sig_fault(SIGSEGV, SEGV_MAPERR, (void __user *)address);
+		up_read(&mm->mmap_lock);
+		return;
+	}
+
+	fault = handle_mm_fault(vma, address, flags, regs);
+
+	if (fault & VM_FAULT_COMPLETED)
+	{
+		// Try to sync the page if the page is outside the enclave
+		if (!vaddr_inside_enclave(encl, address))
+		{
+			mutex_lock(&encl->lock);
+			sync_entry = xa_load(&encl->sync_array, PFN_DOWN(address));
+
+			// If the vaddr has already been synced, first try to unsync
+			if (sync_entry)
+			{
+				ret = sgx_encl_eunsync(encl, sync_entry->paddr, address & PAGE_MASK);
+			}
+			if (ret)
+			{
+				pr_err("eunsync has an error with vaddr:0x%lx, paddr:0x%llx\n",
+					   address, sync_entry->paddr);
+				goto sync_fail;
+			}
+
+			encl->sync_page_cnt--;
+			ret = get_user_pages(address, 1, 0, &page);
+			if (ret < 1)
+			{
+				pr_err("Cannot get the physical address of a user page!\n");
+				goto sync_fail;
+			}
+			pte = vaddr_to_pte(address, mm);
+			if (!pte)
+			{
+				pr_err("Cannot get the pte of a user address!\n");
+				goto sync_fail;
+			}
+
+			paddr = pte_pfn(*pte) << PAGE_SHIFT;
+
+			ret = sgx_encl_esync(encl, paddr, address & PAGE_MASK, pte_present(*pte),
+								 pte_write(*pte), pte_exec(*pte));
+
+			if (ret)
+			{
+				pr_err("esync has an error with vaddr:0x%lx, paddr:0x%llx, rwx: %d%d%d\n",
+					   address, paddr, pte_present(*pte), pte_write(*pte), pte_exec(*pte));
+				goto sync_fail;
+			}
+
+			sync_entry = kzalloc(sizeof(struct sgx_encl_sync_page), GFP_KERNEL);
+			if (!sync_entry)
+			{
+				pr_err("esync OOM");
+				goto sync_fail;
+			}
+
+			encl->sync_page_cnt++;
+			sync_entry->paddr = paddr;
+			ret = xa_insert(&encl->sync_array, PFN_DOWN(address), sync_entry, GFP_KERNEL);
+			if (ret)
+			{
+				pr_err("esync xa insert index 0x%lx failed", PFN_DOWN(address));
+				goto sync_fail;
+			}
+			mutex_unlock(&encl->lock);
+		}
+		return;
+	}
+
+	if (fault & VM_FAULT_RETRY)
+	{
+		flags |= FAULT_FLAG_TRIED;
+		goto retry;
+	}
+
+	up_read(&mm->mmap_lock);
+
+	if (!(fault & VM_FAULT_ERROR))
+		return;
+
+	// Here just kill the current task if OOM.
+	if (fault & VM_FAULT_OOM)
+	{
+		force_sig(SIGKILL);
+	}
+	else
+	{
+		if (fault & (VM_FAULT_SIGBUS | VM_FAULT_HWPOISON | VM_FAULT_HWPOISON_LARGE))
+			force_sig(SIGBUS);
+			//force_sig_fault(SIGBUS, BUS_ADRERR, (void __user *)address);
+		else if (fault & VM_FAULT_SIGSEGV)
+			force_sig(SIGSEGV);
+			//force_sig_fault(SIGSEGV, SEGV_MAPERR, (void __user *)address);
+		else
+		{
+			pr_err("PF handling bug!\n");
+			force_sig(SIGKILL);
+		}
+	}
+	return;
+
+sync_fail:
+	force_sig(SIGKILL);
+	mutex_unlock(&encl->lock);
+	return;
+}
+
+struct vdso_exception_table_entry {
+	int insn, fixup;
+};
+
+// eenter is always called in the vdso area, signal may be downgraded there.
+static bool try_fixup_vdso_exception(struct pt_regs *regs, int trapnr,
+							  unsigned long error_code, unsigned long fault_addr)
+{
+	const struct vdso_image *image = current->mm->context.vdso_image;
+	const struct vdso_exception_table_entry *extable;
+	unsigned int nr_entries, i;
+	unsigned long base;
+
+	/*
+	 * Do not attempt to fixup #DB or #BP.  It's impossible to identify
+	 * whether or not a #DB/#BP originated from within an SGX enclave and
+	 * SGX enclaves are currently the only use case for vDSO fixup.
+	 */
+	if (trapnr == X86_TRAP_DB || trapnr == X86_TRAP_BP)
+		return false;
+
+	if (!current->mm->context.vdso)
+		return false;
+
+	base = (unsigned long)current->mm->context.vdso + image->extable_base;
+	nr_entries = image->extable_len / (sizeof(*extable));
+	extable = image->extable;
+
+	for (i = 0; i < nr_entries; i++)
+	{
+		if (regs->ip == base + extable[i].insn)
+		{
+			regs->ip = base + extable[i].fixup;
+			regs->di = trapnr;
+			regs->si = error_code;
+			regs->dx = fault_addr;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static void do_trap(int trapnr, int signr, struct pt_regs *regs,
+					long error_code, int sicode, void __user *addr)
+{
+	if (try_fixup_vdso_exception(regs, trapnr, error_code, (unsigned long)addr))
+		return;
+
+	// force_sig_fault is not exported
+	force_sig(signr);
+	/*
+	if (!sicode)
+		force_sig(signr);
+	else
+		force_sig_fault(signr, sicode, addr);
+	*/
+}
+
+static void emulate_enclu(struct pt_regs *regs)
+{
+
+	struct sgx_eenter_args param = {0};
+	struct sgx_encl_page *entry;
+	u64 tcs_vaddr;
+	struct sgx_encl *encl;
+	struct task_struct *tsk;
+	struct mm_struct *mm;
+	int ret;
+
+	tsk = current;
+	mm = tsk->mm;
+
+	tcs_vaddr = regs->bx;
+	encl = get_encl_from_vaddr(tcs_vaddr);
+	if (!encl)
+	{
+		do_trap(X86_TRAP_PF, SIGSEGV, regs, 0, 0, (void *)regs->bx);
+		return;
+	}
+
+	entry = xa_load(&encl->tcs_array, tcs_vaddr);
+	if (!entry)
+	{
+		do_trap(X86_TRAP_PF, SIGSEGV, regs, 0, 0, (void *)regs->bx);
+		return;
+	}
+
+	param.tcs_paddr = PFN_PHYS(entry->epc_page->pfn);
+	param.rax = regs->ax;
+	param.rbx = regs->bx;
+	param.rcx = regs->cx;
+	param.rdx = regs->dx;
+	param.rsi = regs->si;
+	param.rdi = regs->di;
+	param.rsp = regs->sp;
+	param.rbp = regs->bp;
+	param.r8 = regs->r8;
+	param.r9 = regs->r9;
+	param.r10 = regs->r10;
+	param.r11 = regs->r11;
+	param.r12 = regs->r12;
+	param.r13 = regs->r13;
+	param.r14 = regs->r14;
+	param.r15 = regs->r15;
+	param.rip = regs->ip;
+	param.rflags = regs->flags;
+
+	//TODO: error is hiden here, should return exact error if enclu failed
+	//      now just return GP.
+	ret = __enclu(&param);
+
+	if (ret)
+	{
+		do_trap(X86_TRAP_GP, SIGSEGV, regs, 0, 0, (void *)regs->ip);
+		return;
+	}
+
+	regs->ax = param.rax;
+	regs->bx = param.rbx;
+	regs->cx = param.rcx;
+	regs->dx = param.rdx;
+	regs->si = param.rsi;
+	regs->di = param.rdi;
+	regs->sp = param.rsp;
+	regs->bp = param.rbp;
+	regs->r8 = param.r8;
+	regs->r9 = param.r9;
+	regs->r10 = param.r10;
+	regs->r11 = param.r11;
+	regs->r12 = param.r12;
+	regs->r13 = param.r13;
+	regs->r14 = param.r14;
+	regs->r15 = param.r15;
+	regs->ip = param.rip;
+
+	switch (param.exit_reason)
+	{
+	case EXIT_REASON_INTERRUPT:
+		current->thread.trap_nr = param.vector;
+		current->thread.error_code = param.error_code;
+		switch (param.vector)
+		{
+		case X86_TRAP_DE:
+			do_trap(X86_TRAP_DE, SIGFPE, regs, 0, FPE_INTDIV, (void __user *)param.rip);
+			break;
+		case X86_TRAP_DB:
+			// Debug has no fixup_vdso path
+			force_sig(SIGTRAP);
+			break;
+		case X86_TRAP_BP:
+			do_trap(X86_TRAP_BP, SIGTRAP, regs, 0, 0, NULL);
+			break;
+		case X86_TRAP_OF:
+		case X86_TRAP_BR:
+		case X86_TRAP_GP:
+			do_trap(param.exit_reason, SIGSEGV, regs, 0, 0, NULL);
+			break;
+		case X86_TRAP_UD:
+			do_trap(X86_TRAP_UD, SIGILL, regs, 0, ILL_ILLOPN, (void __user *)param.rip);
+			break;
+		case X86_TRAP_SS:
+			do_trap(X86_TRAP_SS, SIGBUS, regs, 0, 0, NULL);
+			break;
+		case X86_TRAP_PF:
+			handle_pf(regs, param.error_code, param.cr2, encl);
+			break;
+		// since the floating point is unknown, return FPE_FLTUNK
+		case X86_TRAP_MF:
+			do_trap(X86_TRAP_MF, SIGFPE, regs, 0, FPE_FLTUNK, (void __user *)param.rip);
+			break;
+		case X86_TRAP_AC:
+			do_trap(X86_TRAP_AC, SIGBUS, regs, 0, 0, NULL);
+			break;
+		case X86_TRAP_MC:
+			do_machine_check(regs);
+			break;
+		case X86_TRAP_XF:
+			do_trap(X86_TRAP_XF, SIGFPE, regs, 0, FPE_FLTUNK,  (void __user *)param.rip);
+			break;
+		// NMI should be injected back again by the svsm firmware,
+		// and continue executing
+		case X86_TRAP_NMI:
+			break;
+		default:
+			pr_err("Unexpected interrupt %lld in enclave\n", param.vector);
+			force_sig(SIGSEGV);
+			break;
+		}
+	case EXIT_REASON_EEXIT:
+		break;
+	default:
+		break;
+	}
+}
+
+static int handle_die_event(struct notifier_block *self,
+							unsigned long val,
+							void *data)
+{
+	struct die_args *args = data;
+
+	if (val == DIE_TRAP && args->trapnr == X86_TRAP_UD)
+	{
+		struct pt_regs *regs = args->regs;
+		unsigned char *ip = (unsigned char *)regs->ip;
+
+		// enclu
+		if (ip[0] == 0x0f && ip[1] == 0x01 && ip[2] == 0xd7)
+		{
+			emulate_enclu(regs);
+			return NOTIFY_STOP;
+		}
+	}
+
+	return NOTIFY_DONE;
+}
+
+static void __init register_sgx_die_notifier(void)
+{
+	die_notifier.notifier_call = handle_die_event;
+	die_notifier.priority = 0x7fffffff;
+	register_die_notifier(&die_notifier);
+	pr_info("hook #ud\n");
+}
+
+static void __exit unregister_sgx_die_notifier(void)
+{
+	unregister_die_notifier(&die_notifier);
+	pr_info("unhook #ud\n");
+}
+
 static int __init sgx_init(void)
 {
 	int ret;
-	//int i;
+	// int i;
 	if (!detect_svsm())
 		return -ENODEV;
 
-	//if (!sgx_page_cache_init())
+	// if (!sgx_page_cache_init())
 	//	return -EFAULT;
 #ifdef HAVE_MMPUT_ASYNC
 	k_mmput_async = mmput_async;
 #else
 #ifdef HAVE_KSYM_LOOKUP
-	k_mmput_async = (void*)kallsyms_lookup_name("mmput_async");
+	k_mmput_async = (void *)kallsyms_lookup_name("mmput_async");
 #else
-	#error "kernel version is not be supported. We need either mmput_async or kallsyms_lookup_name exported from kernel"
+#error "kernel version is not be supported. We need either mmput_async or kallsyms_lookup_name exported from kernel"
 #endif
 #endif
-	if (!k_mmput_async){
+	if (!k_mmput_async)
+	{
 		pr_err("mmput_async support missing from kernel.\n");
 		return -EFAULT;
 	}
-	//if (!sgx_page_reclaimer_init())
+	// if (!sgx_page_reclaimer_init())
 	//	goto err_page_cache;
 
 	ret = sgx_drv_init();
 	if (ret)
 		return -EFAULT;
-		//goto err_kthread;
+	// goto err_kthread;
 
 	pr_info(DRV_DESCRIPTION " v" DRV_VERSION "\n");
+
+	register_sgx_die_notifier();
 	return 0;
 
-/*
-err_kthread:
-	kthread_stop(ksgxd_tsk);
+	/*
+	err_kthread:
+		kthread_stop(ksgxd_tsk);
 
-err_page_cache:
-	for (i = 0; i < sgx_nr_epc_sections; i++) {
-		vfree(sgx_epc_sections[i].pages);
-		memunmap(sgx_epc_sections[i].virt_addr);
-	}
-	return -EFAULT;
-*/	
+	err_page_cache:
+		for (i = 0; i < sgx_nr_epc_sections; i++) {
+			vfree(sgx_epc_sections[i].pages);
+			memunmap(sgx_epc_sections[i].virt_addr);
+		}
+		return -EFAULT;
+	*/
 }
 module_init(sgx_init);
 
 static void __exit sgx_exit(void)
 {
-	//int i;
+	// int i;
 	sgx_drv_exit();
-	//kthread_stop(ksgxd_tsk);
+	// kthread_stop(ksgxd_tsk);
 	struct sgx_epc_page *epc_page;
 
 	spin_lock(&sgx_page_pool_lock);
-	while(!list_empty(&sgx_page_pool)) {
+	while (!list_empty(&sgx_page_pool))
+	{
 		epc_page = list_first_entry(&sgx_page_pool, struct sgx_epc_page, list);
 		list_del_init(&epc_page->list);
 		int ret = __eremove(sgx_get_epc_phys_addr(epc_page));
@@ -915,6 +1379,8 @@ static void __exit sgx_exit(void)
 		vfree(epc_page);
 	}
 	spin_unlock(&sgx_page_pool_lock);
+
+	unregister_sgx_die_notifier();
 	pr_info(DRV_DESCRIPTION " v" DRV_VERSION " removed\n");
 	/*
 	for (i = 0; i < sgx_nr_epc_sections; i++) {
