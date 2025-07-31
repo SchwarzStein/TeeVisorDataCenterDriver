@@ -302,8 +302,8 @@ static int __sgx_encl_extend(struct sgx_encl *encl,
 		ret = __eextend(sgx_get_epc_phys_addr(encl->secs.epc_page),
 				sgx_get_epc_phys_addr(epc_page) + offset);
 		if (ret) {
-			if (encls_failed(ret))
-				ENCLS_WARN(ret, "EEXTEND");
+			//if (encls_failed(ret))
+			ENCLS_WARN(ret, "EEXTEND");
 
 			return -EIO;
 		}
