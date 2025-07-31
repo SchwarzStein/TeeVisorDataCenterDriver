@@ -280,7 +280,7 @@ static int __sgx_encl_add_page(struct sgx_encl *encl,
 	pginfo->contents = (unsigned long)page_to_phys(src_page);
 
 	ret = __eadd(virt_to_phys(pginfo), sgx_get_epc_phys_addr(epc_page));
-
+	pr_info("sgx_add_page vaddr:0x%llx, paddr:0x%llx", pginfo->addr, pginfo->contents);
 	kfree(pginfo);
 	put_page(src_page);
 
@@ -494,6 +494,7 @@ static long sgx_ioc_enclave_add_pages(struct sgx_encl *encl, void __user *arg)
 	if (!add_arg.length || add_arg.length & (PAGE_SIZE - 1))
 		return -EINVAL;
 
+	add_arg.dst = add_arg.dst + encl->base;
 	if (!(((add_arg.dst >= encl->base) && (add_arg.dst + add_arg.length <= encl->base + encl->size))
 		|| ((add_arg.dst >= encl->runtime_base) && (add_arg.dst + add_arg.length <= encl->runtime_base + encl->runtime_size))))
 		return -EINVAL;
@@ -506,7 +507,7 @@ static long sgx_ioc_enclave_add_pages(struct sgx_encl *encl, void __user *arg)
 			ret = -EFAULT;
 			goto out;
 	}
-		
+
 	if (sgx_validate_secinfo(secinfo)) {
 		ret = -EINVAL;
 		goto out;
@@ -522,7 +523,6 @@ static long sgx_ioc_enclave_add_pages(struct sgx_encl *encl, void __user *arg)
 
 		if (need_resched())
 			cond_resched();
-
 		ret = sgx_encl_add_page(encl, add_arg.src + c, add_arg.dst + c,
 					secinfo, add_arg.flags);
 		if (ret)

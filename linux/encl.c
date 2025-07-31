@@ -264,7 +264,7 @@ static vm_fault_t sgx_encl_eaug_page(struct vm_area_struct *vma,
 	 * EACCEPT, EACCEPTCOPY and EMODPE.
 	 */
 	secinfo_flags = SGX_SECINFO_R | SGX_SECINFO_W | SGX_SECINFO_X;
-	encl_page = sgx_encl_page_alloc(encl, addr - encl->base, secinfo_flags);
+	encl_page = sgx_encl_page_alloc(encl, addr, secinfo_flags);
 	if (IS_ERR(encl_page))
 		return VM_FAULT_OOM;
 
@@ -393,7 +393,7 @@ static int sgx_vma_fault(struct vm_fault *vmf)
 	if (unlikely(!encl))
 		return VM_FAULT_SIGBUS;
 
-	mutex_lock(&encl->lock);
+	//mutex_lock(&encl->lock);
 
 	/*
 	 * If the page is not added, try to call eaug.
@@ -404,7 +404,7 @@ static int sgx_vma_fault(struct vm_fault *vmf)
 		return sgx_encl_eaug_page(vma, encl, addr);
 	else 
 		ret = VM_FAULT_SIGBUS;
-	mutex_unlock(&encl->lock);
+	//mutex_unlock(&encl->lock);
 	/*
 
 	entry = sgx_encl_load_page(encl, addr, vma->vm_flags);

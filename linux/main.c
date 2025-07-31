@@ -935,156 +935,14 @@ static pte_t *vaddr_to_pte(unsigned long vaddr, struct mm_struct *mm)
 	return pte;
 }
 
-static void handle_pf(struct pt_regs *regs,
-					  unsigned long error_code,
-					  unsigned long address,
-					  struct sgx_encl *encl)
+struct vdso_exception_table_entry
 {
-	struct vm_area_struct *vma;
-	struct task_struct *tsk;
-	struct mm_struct *mm;
-	struct sgx_encl_sync_page *sync_entry;
-	vm_fault_t fault;
-	unsigned int flags = FAULT_FLAG_DEFAULT;
-	struct page *page = NULL;
-	pte_t *pte;
-	u64 paddr;
-	int ret;
-
-	tsk = current;
-	mm = tsk->mm;
-
-	if (error_code & X86_PF_WRITE)
-		flags |= FAULT_FLAG_WRITE;
-	if (error_code & X86_PF_INSTR)
-		flags |= FAULT_FLAG_INSTRUCTION;
-
-	flags |= FAULT_FLAG_USER;
-
-retry:
-	down_read(&mm->mmap_lock);
-	vma = vma_lookup(mm, address);
-	if (!vma)
-	{	
-		force_sig(SIGSEGV);
-		//force_sig_fault(SIGSEGV, SEGV_MAPERR, (void __user *)address);
-		up_read(&mm->mmap_lock);
-		return;
-	}
-
-	fault = handle_mm_fault(vma, address, flags, regs);
-
-	if (fault & VM_FAULT_COMPLETED)
-	{
-		// Try to sync the page if the page is outside the enclave
-		if (!vaddr_inside_enclave(encl, address))
-		{
-			mutex_lock(&encl->lock);
-			sync_entry = xa_load(&encl->sync_array, PFN_DOWN(address));
-
-			// If the vaddr has already been synced, first try to unsync
-			if (sync_entry)
-			{
-				ret = sgx_encl_eunsync(encl, sync_entry->paddr, address & PAGE_MASK);
-			}
-			if (ret)
-			{
-				pr_err("eunsync has an error with vaddr:0x%lx, paddr:0x%llx\n",
-					   address, sync_entry->paddr);
-				goto sync_fail;
-			}
-
-			encl->sync_page_cnt--;
-			ret = get_user_pages(address, 1, 0, &page);
-			if (ret < 1)
-			{
-				pr_err("Cannot get the physical address of a user page!\n");
-				goto sync_fail;
-			}
-			pte = vaddr_to_pte(address, mm);
-			if (!pte)
-			{
-				pr_err("Cannot get the pte of a user address!\n");
-				goto sync_fail;
-			}
-
-			paddr = pte_pfn(*pte) << PAGE_SHIFT;
-
-			ret = sgx_encl_esync(encl, paddr, address & PAGE_MASK, pte_present(*pte),
-								 pte_write(*pte), pte_exec(*pte));
-
-			if (ret)
-			{
-				pr_err("esync has an error with vaddr:0x%lx, paddr:0x%llx, rwx: %d%d%d\n",
-					   address, paddr, pte_present(*pte), pte_write(*pte), pte_exec(*pte));
-				goto sync_fail;
-			}
-
-			sync_entry = kzalloc(sizeof(struct sgx_encl_sync_page), GFP_KERNEL);
-			if (!sync_entry)
-			{
-				pr_err("esync OOM");
-				goto sync_fail;
-			}
-
-			encl->sync_page_cnt++;
-			sync_entry->paddr = paddr;
-			ret = xa_insert(&encl->sync_array, PFN_DOWN(address), sync_entry, GFP_KERNEL);
-			if (ret)
-			{
-				pr_err("esync xa insert index 0x%lx failed", PFN_DOWN(address));
-				goto sync_fail;
-			}
-			mutex_unlock(&encl->lock);
-		}
-		return;
-	}
-
-	if (fault & VM_FAULT_RETRY)
-	{
-		flags |= FAULT_FLAG_TRIED;
-		goto retry;
-	}
-
-	up_read(&mm->mmap_lock);
-
-	if (!(fault & VM_FAULT_ERROR))
-		return;
-
-	// Here just kill the current task if OOM.
-	if (fault & VM_FAULT_OOM)
-	{
-		force_sig(SIGKILL);
-	}
-	else
-	{
-		if (fault & (VM_FAULT_SIGBUS | VM_FAULT_HWPOISON | VM_FAULT_HWPOISON_LARGE))
-			force_sig(SIGBUS);
-			//force_sig_fault(SIGBUS, BUS_ADRERR, (void __user *)address);
-		else if (fault & VM_FAULT_SIGSEGV)
-			force_sig(SIGSEGV);
-			//force_sig_fault(SIGSEGV, SEGV_MAPERR, (void __user *)address);
-		else
-		{
-			pr_err("PF handling bug!\n");
-			force_sig(SIGKILL);
-		}
-	}
-	return;
-
-sync_fail:
-	force_sig(SIGKILL);
-	mutex_unlock(&encl->lock);
-	return;
-}
-
-struct vdso_exception_table_entry {
 	int insn, fixup;
 };
 
 // eenter is always called in the vdso area, signal may be downgraded there.
 static bool try_fixup_vdso_exception(struct pt_regs *regs, int trapnr,
-							  unsigned long error_code, unsigned long fault_addr)
+									 unsigned long error_code, unsigned long fault_addr)
 {
 	const struct vdso_image *image = current->mm->context.vdso_image;
 	const struct vdso_exception_table_entry *extable;
@@ -1121,6 +979,164 @@ static bool try_fixup_vdso_exception(struct pt_regs *regs, int trapnr,
 	return false;
 }
 
+static void handle_pf(struct pt_regs *regs,
+					  unsigned long error_code,
+					  unsigned long address,
+					  struct sgx_encl *encl)
+{
+	struct vm_area_struct *vma;
+	struct task_struct *tsk;
+	struct mm_struct *mm;
+	struct sgx_encl_sync_page *sync_entry;
+	vm_fault_t fault;
+	unsigned int flags = FAULT_FLAG_DEFAULT;
+	struct page *page = NULL;
+	pte_t *pte;
+	u64 paddr;
+	int ret;
+
+	tsk = current;
+	mm = tsk->mm;
+	pr_info("try to handle pf address:%lx, error_code: %lx", address, error_code);
+	if (error_code & X86_PF_WRITE)
+		flags |= FAULT_FLAG_WRITE;
+	if (error_code & X86_PF_INSTR)
+		flags |= FAULT_FLAG_INSTRUCTION;
+
+	flags |= FAULT_FLAG_USER;
+
+retry:
+	down_read(&mm->mmap_lock);
+	vma = vma_lookup(mm, address);
+	if (!vma)
+	{
+		force_sig(SIGSEGV);
+		// force_sig_fault(SIGSEGV, SEGV_MAPERR, (void __user *)address);
+		up_read(&mm->mmap_lock);
+		return;
+	}
+
+	fault = handle_mm_fault(vma, address, flags, regs);
+
+	pr_info("handle_mm_fault return value %x", fault);
+
+	// If VM_FAULT_COMPLETED is set, mmap_lock is released
+	if (fault & VM_FAULT_COMPLETED)
+	{
+		return;
+	}
+
+	if (fault & VM_FAULT_RETRY)
+	{
+		flags |= FAULT_FLAG_TRIED;
+		goto retry;
+	}
+
+	if (!(fault & VM_FAULT_ERROR))
+	{
+		// Try to sync the page if the page is outside the enclave
+		if (!vaddr_inside_enclave(encl, address))
+		{
+			mutex_lock(&encl->lock);
+			sync_entry = xa_load(&encl->sync_array, PFN_DOWN(address));
+
+			// If the vaddr has already been synced, first try to unsync
+			if (sync_entry)
+			{
+				pr_info("eunsync address: 0x%lx, paddr: 0x%llx", address, sync_entry->paddr);
+				ret = sgx_encl_eunsync(encl, sync_entry->paddr, PFN_DOWN(address));
+				if (ret)
+				{
+					pr_err("eunsync has an error with vaddr:0x%lx, paddr:0x%llx\n",
+						address, sync_entry->paddr);
+					goto sync_fail;
+				}
+			}
+
+			encl->sync_page_cnt--;
+			ret = get_user_pages(address, 1, 0, &page);
+			if (ret < 1)
+			{
+				pr_err("Cannot get the physical address of a user page!\n");
+				goto sync_fail;
+			}
+			pte = vaddr_to_pte(address, mm);
+			if (!pte)
+			{
+				pr_err("Cannot get the pte of a user address!\n");
+				goto sync_fail;
+			}
+
+			paddr = pte_pfn(*pte) << PAGE_SHIFT;
+
+			ret = sgx_encl_esync(encl, paddr, address & PAGE_MASK, pte_present(*pte),
+								 pte_write(*pte), pte_exec(*pte));
+			pr_info("esync address: 0x%lx, paddr: 0x%llx, pte: 0x%lx", address, paddr, pte->pte);
+			if (ret)
+			{
+				pr_err("esync has an error with vaddr:0x%lx, paddr:0x%llx, rwx: %d%d%d\n",
+					   address, paddr, pte_present(*pte), pte_write(*pte), pte_exec(*pte));
+				goto sync_fail;
+			}
+
+			sync_entry = kzalloc(sizeof(struct sgx_encl_sync_page), GFP_KERNEL);
+			if (!sync_entry)
+			{
+				pr_err("esync OOM");
+				goto sync_fail;
+			}
+
+			encl->sync_page_cnt++;
+			sync_entry->paddr = paddr;
+			ret = xa_insert(&encl->sync_array, PFN_DOWN(address), sync_entry, GFP_KERNEL);
+			if (ret)
+			{
+				pr_err("esync xa insert index 0x%lx failed", PFN_DOWN(address));
+				goto sync_fail;
+			}
+			mutex_unlock(&encl->lock);
+		}
+		up_read(&mm->mmap_lock);
+		return;
+	}
+
+	up_read(&mm->mmap_lock);
+	// Here just kill the current task if OOM.
+	if (fault & VM_FAULT_OOM)
+	{
+		force_sig(SIGKILL);
+	}
+	else
+	{
+		if (fault & (VM_FAULT_SIGBUS | VM_FAULT_HWPOISON | VM_FAULT_HWPOISON_LARGE))
+		{
+			if (try_fixup_vdso_exception(regs, X86_TRAP_PF, error_code, address))
+				return;
+			force_sig(SIGBUS);
+		}
+		// force_sig_fault(SIGBUS, BUS_ADRERR, (void __user *)address);
+		else if (fault & VM_FAULT_SIGSEGV)
+		{
+			if (try_fixup_vdso_exception(regs, X86_TRAP_PF, error_code, address))
+				return;
+			force_sig(SIGSEGV);
+		}
+		// force_sig_fault(SIGSEGV, SEGV_MAPERR, (void __user *)address);
+		else
+		{
+			pr_err("PF handling bug!\n");
+			force_sig(SIGKILL);
+		}
+	}
+
+	return;
+
+sync_fail:
+	force_sig(SIGKILL);
+	mutex_unlock(&encl->lock);
+	return;
+}
+
 static void do_trap(int trapnr, int signr, struct pt_regs *regs,
 					long error_code, int sicode, void __user *addr)
 {
@@ -1135,6 +1151,26 @@ static void do_trap(int trapnr, int signr, struct pt_regs *regs,
 	else
 		force_sig_fault(signr, sicode, addr);
 	*/
+}
+
+static void dump_sgx_args(struct sgx_eenter_args *args)
+{
+	trace_printk("SGX EENTER args:\n");
+	trace_printk("  tcs_paddr = 0x%016llx\n", args->tcs_paddr);
+	trace_printk("  rax = 0x%016llx  rbx = 0x%016llx  rcx = 0x%016llx  rdx = 0x%016llx\n",
+				 args->rax, args->rbx, args->rcx, args->rdx);
+	trace_printk("  rsi = 0x%016llx  rdi = 0x%016llx  rsp = 0x%016llx  rbp = 0x%016llx\n",
+				 args->rsi, args->rdi, args->rsp, args->rbp);
+	trace_printk("  r8  = 0x%016llx  r9  = 0x%016llx  r10 = 0x%016llx  r11 = 0x%016llx\n",
+				 args->r8, args->r9, args->r10, args->r11);
+	trace_printk("  r12 = 0x%016llx  r13 = 0x%016llx  r14 = 0x%016llx  r15 = 0x%016llx\n",
+				 args->r12, args->r13, args->r14, args->r15);
+	trace_printk("  rip = 0x%016llx  rflags = 0x%016llx  cr2 = 0x%016llx\n",
+				 args->rip, args->rflags, args->cr2);
+	trace_printk("  mxcsr = 0x%08x  fcw = 0x%04x  fsw = 0x%04x\n",
+				 args->mxcsr, args->fcw, args->fsw);
+	trace_printk("  exit_reason = 0x%016llx  vector = 0x%016llx  error_code = 0x%016llx\n",
+				 args->exit_reason, args->vector, args->error_code);
 }
 
 static void emulate_enclu(struct pt_regs *regs)
@@ -1152,16 +1188,19 @@ static void emulate_enclu(struct pt_regs *regs)
 	mm = tsk->mm;
 
 	tcs_vaddr = regs->bx;
+	pr_info("tcs_vaddr :%llx", tcs_vaddr);
 	encl = get_encl_from_vaddr(tcs_vaddr);
 	if (!encl)
 	{
+		pr_err("emulate_enclu get enclave failed");
 		do_trap(X86_TRAP_PF, SIGSEGV, regs, 0, 0, (void *)regs->bx);
 		return;
 	}
 
-	entry = xa_load(&encl->tcs_array, tcs_vaddr);
+	entry = xa_load(&encl->tcs_array, PFN_DOWN(tcs_vaddr));
 	if (!entry)
 	{
+		pr_err("emulate_enclu get tcs_array failed");
 		do_trap(X86_TRAP_PF, SIGSEGV, regs, 0, 0, (void *)regs->bx);
 		return;
 	}
@@ -1186,12 +1225,18 @@ static void emulate_enclu(struct pt_regs *regs)
 	param.rip = regs->ip;
 	param.rflags = regs->flags;
 
-	//TODO: error is hiden here, should return exact error if enclu failed
-	//      now just return GP.
-	ret = __enclu(&param);
-
+	trace_printk("input param: ");
+	dump_sgx_args(&param);
+	// TODO: error is hiden here, should return exact error if enclu failed
+	//       now just return GP.
+	pr_info("run enclu");
+	ret = snp_sgx_enclu(&param);
+	pr_info("return from enclu");
+	trace_printk("output param: ");
+	dump_sgx_args(&param);
 	if (ret)
 	{
+		pr_err("enclu failed");
 		do_trap(X86_TRAP_GP, SIGSEGV, regs, 0, 0, (void *)regs->ip);
 		return;
 	}
@@ -1219,6 +1264,7 @@ static void emulate_enclu(struct pt_regs *regs)
 	case EXIT_REASON_INTERRUPT:
 		current->thread.trap_nr = param.vector;
 		current->thread.error_code = param.error_code;
+		trace_printk("EXIT_REASON_INTERRUPT vector:%lld", param.vector);
 		switch (param.vector)
 		{
 		case X86_TRAP_DE:
@@ -1256,7 +1302,7 @@ static void emulate_enclu(struct pt_regs *regs)
 			do_machine_check(regs);
 			break;
 		case X86_TRAP_XF:
-			do_trap(X86_TRAP_XF, SIGFPE, regs, 0, FPE_FLTUNK,  (void __user *)param.rip);
+			do_trap(X86_TRAP_XF, SIGFPE, regs, 0, FPE_FLTUNK, (void __user *)param.rip);
 			break;
 		// NMI should be injected back again by the svsm firmware,
 		// and continue executing
@@ -1267,7 +1313,9 @@ static void emulate_enclu(struct pt_regs *regs)
 			force_sig(SIGSEGV);
 			break;
 		}
+		break;
 	case EXIT_REASON_EEXIT:
+		pr_info("EXIT_REASON_EEXIT");
 		break;
 	default:
 		break;
@@ -1283,11 +1331,15 @@ static int handle_die_event(struct notifier_block *self,
 	if (val == DIE_TRAP && args->trapnr == X86_TRAP_UD)
 	{
 		struct pt_regs *regs = args->regs;
-		unsigned char *ip = (unsigned char *)regs->ip;
-
+		unsigned char buf[3];
 		// enclu
-		if (ip[0] == 0x0f && ip[1] == 0x01 && ip[2] == 0xd7)
+
+		if (copy_from_user(buf, (void __user *)regs->ip, 3))
+			return NOTIFY_DONE;
+
+		if (buf[0] == 0x0f && buf[1] == 0x01 && buf[2] == 0xd7)
 		{
+			pr_info("handle_die_event emulate");
 			emulate_enclu(regs);
 			return NOTIFY_STOP;
 		}
