@@ -606,51 +606,11 @@ static int sgx_encl_init(struct sgx_encl *encl, struct sgx_sigstruct *sigstruct,
 
 	mutex_lock(&encl->lock);
 
-	/*
-	 * ENCLS[EINIT] is interruptible because it has such a high latency,
-	 * e.g. 50k+ cycles on success. If an IRQ/NMI/SMI becomes pending,
-	 * EINIT may fail with SGX_UNMASKED_EVENT so that the event can be
-	 * serviced.
-	 */
-	for (i = 0; i < SGX_EINIT_SLEEP_COUNT; i++) {
-		for (j = 0; j < SGX_EINIT_SPIN_COUNT; j++) {
-			addr = sgx_get_epc_phys_addr(encl->secs.epc_page);
+	addr = sgx_get_epc_phys_addr(encl->secs.epc_page);
+	ret = __einit(virt_to_phys(sigstruct), virt_to_phys(token), addr);
 
-			preempt_disable();
-
-			/*
-			for (k = 0; k < 4; k++)
-				wrmsrl(MSR_IA32_SGXLEPUBKEYHASH0 + k, mrsigner[k]);
-			*/
-
-			ret = __einit(virt_to_phys(sigstruct), virt_to_phys(token), addr);
-
-			preempt_enable();
-
-			if (ret == SGX_UNMASKED_EVENT)
-				continue;
-			else
-				break;
-		}
-
-		if (ret != SGX_UNMASKED_EVENT)
-			break;
-
-		msleep_interruptible(SGX_EINIT_SLEEP_TIME);
-
-		if (signal_pending(current)) {
-			ret = -ERESTARTSYS;
-			goto err_out;
-		}
-	}
-
-	if (ret & ENCLS_FAULT_FLAG) {
-		if (encls_failed(ret))
-			ENCLS_WARN(ret, "EINIT");
-
-		ret = -EIO;
-	} else if (ret) {
-		pr_debug("EINIT returned %d\n", ret);
+	if (ret) {
+		pr_info("EINIT returned %d\n", ret);
 		ret = -EPERM;
 	} else {
 		set_bit(SGX_ENCL_INITIALIZED, &encl->flags);
