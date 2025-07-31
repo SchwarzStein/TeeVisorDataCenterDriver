@@ -179,13 +179,11 @@ static struct sgx_encl_page *sgx_get_encl_page(struct sgx_encl *encl,
 	/* Entry successfully located. */
 	return entry;
 }
-/*
-static struct sgx_encl_page *sgx_encl_load_page(struct sgx_encl *encl,
-						unsigned long addr,
-						unsigned long vm_flags)
+
+struct sgx_encl_page *sgx_encl_load_page(struct sgx_encl *encl,
+						unsigned long addr)
 {
-	unsigned long vm_prot_bits = vm_flags & (VM_READ | VM_WRITE | VM_EXEC);
-	struct sgx_epc_page *epc_page;
+	//struct sgx_epc_page *epc_page;
 	struct sgx_encl_page *entry;
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0))
@@ -195,15 +193,7 @@ static struct sgx_encl_page *sgx_encl_load_page(struct sgx_encl *encl,
 #endif
 	if (!entry)
 		return ERR_PTR(-EFAULT);
-*/
-	/*
-	 * Verify that the faulted page has equal or higher build time
-	 * permissions than the VMA permissions (i.e. the subset of {VM_READ,
-	 * VM_WRITE, VM_EXECUTE} in vma->vm_flags).
-	 *//*
-	if ((entry->vm_max_prot_bits & vm_prot_bits) != vm_prot_bits)
-		return ERR_PTR(-EFAULT);
-*/
+
 	/* Entry successfully located. *//*
 	if (entry->epc_page) {
 		if (entry->desc & SGX_ENCL_PAGE_BEING_RECLAIMED)
@@ -223,11 +213,11 @@ static struct sgx_encl_page *sgx_encl_load_page(struct sgx_encl *encl,
 		return ERR_CAST(epc_page);
 
 	encl->secs_child_cnt++;
-	sgx_mark_page_reclaimable(entry->epc_page);
+	sgx_mark_page_reclaimable(entry->epc_page);*/
 
 	return entry;
 }
-*/
+
 
 /**
  * sgx_encl_eaug_page() - Dynamically add page to initialized enclave
@@ -556,13 +546,12 @@ int sgx_encl_may_map(struct sgx_encl *encl, unsigned long start,
 #endif
 }
 
-/* ! Note: Not ported from inkernel patches
+
 static int sgx_vma_mprotect(struct vm_area_struct *vma, unsigned long start,
 			    unsigned long end, unsigned long newflags)
 {
 	return sgx_encl_may_map(vma->vm_private_data, start, end, newflags);
 }
-*/
 
 static int sgx_encl_debug_read(struct sgx_encl *encl, struct sgx_encl_page *page,
 			       unsigned long addr, void *data)
@@ -676,7 +665,7 @@ out:
 
 const struct vm_operations_struct sgx_vm_ops = {
 	.fault = sgx_vma_fault,
-//	.mprotect = sgx_vma_mprotect, //not ported from inkernel
+	.mprotect = sgx_vma_mprotect,
 	.open = sgx_vma_open,
 	.access = sgx_vma_access,
 };

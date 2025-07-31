@@ -57,6 +57,19 @@ enum sgx_encls_function {
 	} while (0);							  \
 }
 
+/*
+ * encls_faulted() - Check if an ENCLS leaf faulted given an error code
+ * @ret:	the return value of an ENCLS leaf function call
+ *
+ * Return:
+ * - true:	ENCLS leaf faulted.
+ * - false:	Otherwise.
+ */
+static inline bool encls_faulted(int ret)
+{
+	return ret & ENCLS_FAULT_FLAG;
+}
+
 /**
  * encls_failed() - Check if an ENCLS function failed
  * @ret:	the return value of an ENCLS function call
@@ -65,6 +78,7 @@ enum sgx_encls_function {
  * fault that is not caused by an EPCM conflict or when the function returns a
  * non-zero value.
  */
+/*
 static inline bool encls_failed(int ret)
 {
 	int epcm_trapnr;
@@ -79,6 +93,7 @@ static inline bool encls_failed(int ret)
 
 	return !!ret;
 }
+*/
 
 /**
  * __encls_ret_N - encode an ENCLS function that returns an error code in EAX
@@ -286,4 +301,9 @@ static inline int __ewb(struct sgx_pageinfo *pginfo, void *addr,
 	return __encls_ret_3(EWB, pginfo, addr, va);
 }
 
+/* Restrict the EPCM permissions of an EPC page. */
+static inline int __emodpr(u64 secinfo, u64 addr)
+{
+	return snp_sgx_encls(SVSM_ENCL_EMODPR, secinfo, addr, 0);
+}
 #endif /* _X86_ENCLS_H */
