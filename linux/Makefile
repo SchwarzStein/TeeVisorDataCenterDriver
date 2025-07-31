@@ -4,7 +4,7 @@
 ifneq ($(KERNELRELEASE),)
 
 obj-m += teevisor.o
-teevisor-y := encl.o main.o driver.o ioctl.o
+teevisor-y := encl.o main.o driver.o ioctl.o protocol.o
 
 else
 
@@ -18,12 +18,6 @@ endif
 ifneq ($(KSYM_LOOKUP),)
 	 EXTRA_CFLAGS += -DHAVE_KSYM_LOOKUP
 endif
-INKERNEL_SGX :=$(shell cat $(KDIR)/.config | grep "CONFIG_X86_SGX=y\|CONFIG_INTEL_SGX=y")
-ifneq ($(INKERNEL_SGX),)
-default:
-	$(error Can't install DCAP SGX driver with inkernel SGX support)
-
-else
 
 PWD  := $(shell pwd)
 EXTRA_CFLAGS += -I$(PWD) -I$(PWD)/include -D_FORTIFY_SOURCE=2 -Wl,-z,relro,-z,now
@@ -32,7 +26,6 @@ EXTRA_LDFLAGS := -z noexecstack
 default:
 	$(MAKE) -C $(KDIR) M=$(PWD) LDFLAGS_MODULE="$(EXTRA_LDFLAGS)" CFLAGS_MODULE="$(EXTRA_CFLAGS)" modules
 
-endif
 endif
 
 clean:

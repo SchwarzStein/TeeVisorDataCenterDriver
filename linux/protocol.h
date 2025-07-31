@@ -1,0 +1,80 @@
+#ifndef SVSM_PROTOCOL_H
+#define SVSM_PROTOCOL_H
+
+#include <linux/percpu-defs.h>
+#include <linux/types.h>
+#include <asm/sev.h>
+#include <asm/cmpxchg.h>
+#include <asm/msr-index.h> // MSR_SVSM_CAA register is defined here.
+#include <asm/svm.h>
+
+#define SVSM_ENCL_CALL(x) ((0x10ULL << 32) | (x))
+#define SVSM_ENCL_ENCLU 0
+#define SVSM_ENCL_ECREATE 1
+#define SVSM_ENCL_EADD 2
+#define SVSM_ENCL_EEXTEND 3
+#define SVSM_ENCL_EINIT 4
+#define SVSM_ENCL_EAUG 5
+#define SVSM_ENCL_ECLONEINFO 6
+#define SVSM_ENCL_ECLONE 7
+#define SVSM_ENCL_EREMOVE 8
+#define SVSM_ENCL_ESYNC 9
+#define SVSM_ENCL_EMODPR 10
+#define SVSM_ENCL_EMODT 11
+#define SVSM_ENCL_EDBGRD 12
+#define SVSM_ENCL_EDBGWR 13
+
+#define SVSM_ERR_PROTOCOL 0x80001000
+#define SVSM_ENCLAVE_PROTOCOL_BASE 800
+#define SVSM_ERR_PROTOCOL_ENCLAVE(x) (SVSM_ERR_PROTOCOL + SVSM_ENCLAVE_PROTOCOL_BASE + (x))
+
+#define EXIT_REASON_EEXIT			0
+#define EXIT_REASON_INTERRUPT		1
+
+#define SVSM_VMPL 0
+#define ENCLAVE_VMPL 1
+
+// Kernel definition missed a parenthesis here
+// will always switch to vmpl0
+#define _GHCB_MSR_VMPL_REQ_LEVEL(v)			\
+	/* GHCBData[39:32] */				\
+	((((u64)(v) & GENMASK_ULL(7, 0)) << 32) |		\
+	/* GHCBDdata[11:0] */				\
+	GHCB_MSR_VMPL_REQ)
+
+/*
+ * SVSM protocol enclave extension structure
+ */
+struct sgx_eenter_args
+{
+	u64 tcs_paddr;
+    u64 rax;
+    u64 rbx;
+    u64 rcx;
+    u64 rdx;
+    u64 rsi;
+    u64 rdi;
+    u64 rsp;
+    u64 rbp;
+    u64 r8;
+    u64 r9;
+    u64 r10;
+    u64 r11;
+    u64 r12;
+    u64 r13;
+    u64 r14;
+    u64 r15;
+    u64 rip;
+    u64 rflags;
+    u64 cr2;
+    u32 mxcsr;
+    u16 fcw;
+    u16 fsw;
+    u64 exit_reason;
+    u64 vector;
+	u64 error_code;
+} __attribute__((packed));
+
+int snp_sgx_encls(unsigned long index, unsigned long rcx, unsigned long rdx, unsigned long r8);
+int snp_sgx_enclu(struct sgx_eenter_args *param);
+#endif 

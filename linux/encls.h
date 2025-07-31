@@ -7,11 +7,11 @@
 #include <linux/io.h>
 #include <linux/rwsem.h>
 #include <linux/types.h>
-#include <asm/sev.h>
 #include <asm/asm.h>
 #include <asm/traps.h>
 #include "sgx.h"
 #include "dcap.h"
+#include "protocol.h"
 
 enum sgx_encls_function {
 	ECREATE	= 0x00,

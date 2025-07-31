@@ -16,7 +16,7 @@
 #include <asm/sev.h>
 #include "driver.h"
 #include "encl.h"
-#include "enclu.h"
+#include "protocol.h"
 #include "encls.h"
 
 #include <linux/module.h>
