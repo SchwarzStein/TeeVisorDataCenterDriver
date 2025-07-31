@@ -1,6 +1,7 @@
 #include <asm/traps.h>
 #include <linux/sched/signal.h>
 #include "protocol.h"
+#include "encls.h"
 
 static DEFINE_PER_CPU(struct svsm_ca *, svsm_caa) = NULL;
 static DEFINE_PER_CPU(u64, svsm_caa_pa);
@@ -57,13 +58,13 @@ static inline int svsm_process_enclave_result_codes(struct svsm_call *call)
 	case SVSM_ERR_BUSY:
 		return -EAGAIN;
     case SVSM_ERR_PROTOCOL_ENCLAVE(X86_TRAP_GP):
-        force_sig(SIGKILL);
-        return -EINVAL;
     case SVSM_ERR_PROTOCOL_ENCLAVE(X86_TRAP_PF):
+		pr_err("get exception %lld", SVSM_ENCLAVE_FAULT(call->rax_out));
         force_sig(SIGSEGV);
-        return -EINVAL;
+        return (int)(ENCLS_FAULT_FLAG | SVSM_ENCLAVE_FAULT(call->rax_out));
 	default:
-		return -EINVAL;
+		pr_err("get error code 0x%llx", call->rax_out);
+		return (int)SVSM_ENCLAVE_ERROR(call->rax_out);
 	}
 }
 
@@ -95,9 +96,6 @@ static int svsm_perform_msr_protocol(struct svsm_call *call, u64 target_vmpl)
 	if (GHCB_MSR_VMPL_RESP_VAL(resp))
 		return -EINVAL;
 
-	if (call->rax_out) {
-		pr_err("svsm_perform_msr_protocol error code : %llx", call->rax_out);
-	}
 	return svsm_process_enclave_result_codes(call);
 }
 
