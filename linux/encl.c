@@ -728,6 +728,7 @@ void sgx_encl_release(struct kref *ref)
 		kfree(sync_entry);
 	}
 	xa_destroy(&encl->sync_array);
+	xa_destroy(&encl->tcs_array);
 
 	if (!encl->secs_child_cnt && encl->secs.epc_page) {
 		sgx_free_epc_page(encl->secs.epc_page);

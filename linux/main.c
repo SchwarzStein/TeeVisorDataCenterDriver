@@ -761,19 +761,25 @@ void sgx_free_epc_page(struct sgx_epc_page *page)
  *
  * Call EREMOVE for an EPC page
  */
-void sgx_free_epc_page(struct sgx_epc_page *page)
+void sgx_free_epc_page(struct sgx_epc_page *epc_page)
 {
 	int ret;
+	struct page *page = pfn_to_page(epc_page->pfn);
 
-	WARN_ON_ONCE(page->flags & SGX_EPC_PAGE_RECLAIMER_TRACKED);
+	WARN_ON_ONCE(epc_page->flags & SGX_EPC_PAGE_RECLAIMER_TRACKED);
 
-	ret = __eremove(sgx_get_epc_phys_addr(page));
-	if (WARN_ONCE(ret, "EREMOVE returned %d (0x%x)", ret, ret))
+	ret = __eremove(sgx_get_epc_phys_addr(epc_page));
+	if (ret)
+	{
+		pr_err("EREMOVE returned %d (0x%x)", ret, ret);
 		return;
+	}
 
 	spin_lock(&sgx_page_pool_lock);
-	list_del_init(&page->list);
+	list_del_init(&epc_page->list);
 	spin_unlock(&sgx_page_pool_lock);
+	__free_page(page);
+	vfree(epc_page);
 }
 
 /*
@@ -1424,11 +1430,8 @@ static void __exit sgx_exit(void)
 	{
 		epc_page = list_first_entry(&sgx_page_pool, struct sgx_epc_page, list);
 		list_del_init(&epc_page->list);
-		int ret = __eremove(sgx_get_epc_phys_addr(epc_page));
 		pr_info("remove page %lx when module exit\n", sgx_get_epc_phys_addr(epc_page));
-		if (!ret)
-			pr_err("Page with pfn 0x%lx cannot be removed when module exits, memory leak happens", epc_page->pfn);
-		vfree(epc_page);
+		sgx_free_epc_page(epc_page);
 	}
 	spin_unlock(&sgx_page_pool_lock);
 
