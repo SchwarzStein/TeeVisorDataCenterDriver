@@ -59,8 +59,7 @@ static inline int svsm_process_enclave_result_codes(struct svsm_call *call)
 		return -EAGAIN;
     case SVSM_ERR_PROTOCOL_ENCLAVE(X86_TRAP_GP):
     case SVSM_ERR_PROTOCOL_ENCLAVE(X86_TRAP_PF):
-		pr_err("get exception %lld", SVSM_ENCLAVE_FAULT(call->rax_out));
-        force_sig(SIGSEGV);
+		//pr_err("get exception %lld", SVSM_ENCLAVE_FAULT(call->rax_out));
         return (int)(ENCLS_FAULT_FLAG | SVSM_ENCLAVE_FAULT(call->rax_out));
 	default:
 		pr_err("get error code 0x%llx", call->rax_out);
