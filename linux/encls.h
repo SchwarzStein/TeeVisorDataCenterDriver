@@ -306,4 +306,11 @@ static inline int __emodpr(u64 secinfo, u64 addr)
 {
 	return snp_sgx_encls(SVSM_ENCL_EMODPR, secinfo, addr, 0);
 }
+
+/* Change the type of an EPC page. */
+static inline int __emodt(u64 secinfo, u64 addr)
+{
+	return snp_sgx_encls(SVSM_ENCL_EMODT, secinfo, addr, 0);
+}
+
 #endif /* _X86_ENCLS_H */
