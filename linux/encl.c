@@ -105,6 +105,10 @@ int sgx_encl_esync(struct sgx_encl *encl, u64 paddr, u64 vaddr, bool read, bool 
 	pginfo = kmalloc(sizeof(struct sgx_pageinfo) ,GFP_KERNEL);
 	secinfo = kzalloc(sizeof(struct sgx_secinfo), GFP_KERNEL);
 
+	if (!pginfo || !secinfo) {
+		return -ENOMEM;
+	}
+
 	pginfo->secs = (unsigned long)sgx_get_epc_phys_addr(encl->secs.epc_page);
 	pginfo->addr = vaddr;
 	pginfo->metadata = virt_to_phys(secinfo);
@@ -140,6 +144,10 @@ int sgx_encl_eunsync(struct sgx_encl *encl, u64 paddr, u64 vaddr)
 
 	pginfo = kmalloc(sizeof(struct sgx_pageinfo) ,GFP_KERNEL);
 	secinfo = kzalloc(sizeof(struct sgx_secinfo), GFP_KERNEL);
+
+	if (!pginfo || !secinfo) {
+		return -ENOMEM;
+	}
 
 	pginfo->secs = (unsigned long)sgx_get_epc_phys_addr(encl->secs.epc_page);
 	pginfo->addr = vaddr;
@@ -297,6 +305,11 @@ static vm_fault_t sgx_encl_eaug_page(struct vm_area_struct *vma,
 		goto err_out_shrink;
 
 	pginfo = kzalloc(sizeof(struct sgx_pageinfo) ,GFP_KERNEL);
+
+	if (!pginfo) {
+		return -ENOMEM;
+	}
+
 	pginfo->secs = (unsigned long)sgx_get_epc_phys_addr(encl->secs.epc_page);
 	pginfo->addr = encl_page->desc & PAGE_MASK;
 	pginfo->metadata = 0;

@@ -101,6 +101,10 @@ static int sgx_encl_create(struct sgx_encl *encl, struct sgx_secs *secs)
 	encl->secs.epc_page = secs_epc;
 	pginfo = kmalloc(sizeof(struct sgx_pageinfo) ,GFP_KERNEL);
 	secinfo = kmalloc(sizeof(struct sgx_secinfo) ,GFP_KERNEL);
+	if (!pginfo || !secinfo) {
+		ret = -ENOMEM;
+		goto err_out_backing;
+	}
 
 	pginfo->addr = 0;
 	pginfo->contents = (unsigned long)virt_to_phys(secs);
@@ -274,6 +278,11 @@ static int __sgx_encl_add_page(struct sgx_encl *encl,
 		return -EFAULT;
 
 	pginfo = kmalloc(sizeof(struct sgx_pageinfo) ,GFP_KERNEL);
+
+	if (!pginfo) {
+		return -ENOMEM;
+	}
+
 	pginfo->secs = (unsigned long)sgx_get_epc_phys_addr(encl->secs.epc_page);
 	pginfo->addr = encl_page->desc & PAGE_MASK;
 	pginfo->metadata = virt_to_phys(secinfo);
@@ -770,6 +779,11 @@ sgx_enclave_restrict_permissions(struct sgx_encl *encl,
 
 
 	secinfo = kzalloc(sizeof(struct sgx_secinfo), GFP_KERNEL);
+
+	if (!secinfo) {
+		return -ENOMEM;
+	}
+
 	secinfo->flags = modp->permissions & SGX_SECINFO_PERMISSION_MASK;
 
 	for (c = 0 ; c < modp->length; c += PAGE_SIZE) {
@@ -928,6 +942,10 @@ static long sgx_enclave_modify_types(struct sgx_encl *encl,
 		return -EINVAL;
 
 	secinfo = kzalloc(sizeof(struct sgx_secinfo), GFP_KERNEL);
+
+	if (!secinfo) {
+		return -ENOMEM;
+	}
 
 	secinfo->flags = page_type << 8;
 
@@ -1119,6 +1137,10 @@ static long sgx_encl_remove_pages(struct sgx_encl *encl,
 	int ret;
 
 	secinfo = kzalloc(sizeof(struct sgx_secinfo), GFP_KERNEL);
+	if (!secinfo) {
+		return -ENOMEM;
+	}
+
 	secinfo->flags = SGX_SECINFO_R | SGX_SECINFO_W | SGX_SECINFO_X;
 
 	for (c = 0 ; c < params->length; c += PAGE_SIZE) {
