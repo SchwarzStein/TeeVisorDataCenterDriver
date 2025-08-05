@@ -262,14 +262,30 @@ static inline int __eremove(void *addr)
 }
 */
 
+/*
 static inline int __edbgwr(void *addr, unsigned long *data)
 {
 	return __encls_2(EDGBWR, *data, addr);
 }
+*/
 
+static inline int __edbgwr(u64 addr, u64 data)
+{
+	//pr_err("__edbgwr addr: 0x%llx, data: 0x%llx", addr, data);
+	return snp_sgx_encls(SVSM_ENCL_EDBGWR, data, addr, 0);
+}
+
+/*
 static inline int __edbgrd(void *addr, unsigned long *data)
 {
 	return __encls_1_1(EDGBRD, *data, addr);
+}
+*/
+
+static inline int __edbgrd(u64 addr, u64 data_paddr)
+{
+	//pr_err("__edbgrd addr: 0x%llx, data: 0x%llx", addr, data_paddr);
+	return snp_sgx_encls(SVSM_ENCL_EDBGRD, data_paddr, addr, 0);
 }
 
 static inline int __etrack(void *addr)

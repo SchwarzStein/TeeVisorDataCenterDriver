@@ -573,7 +573,7 @@ static int sgx_encl_debug_read(struct sgx_encl *encl, struct sgx_encl_page *page
 	int ret;
 
 
-	ret = __edbgrd((void *)sgx_get_epc_phys_addr(page->epc_page) + offset, data);
+	ret = __edbgrd(sgx_get_epc_phys_addr(page->epc_page) + offset, virt_to_phys(data));
 	if (ret)
 		return -EIO;
 
@@ -586,7 +586,7 @@ static int sgx_encl_debug_write(struct sgx_encl *encl, struct sgx_encl_page *pag
 	unsigned long offset = addr & ~PAGE_MASK;
 	int ret;
 
-	ret = __edbgwr((void *)sgx_get_epc_phys_addr(page->epc_page) + offset, data);
+	ret = __edbgwr(sgx_get_epc_phys_addr(page->epc_page) + offset, *(u64 *)data);
 	if (ret)
 		return -EIO;
 
@@ -623,13 +623,15 @@ static int sgx_vma_access(struct vm_area_struct *vma, unsigned long addr,
 {
 	struct sgx_encl *encl = vma->vm_private_data;
 	struct sgx_encl_page *entry = NULL;
-	char data[sizeof(unsigned long)];
+	char *data;
 	unsigned long align;
 	int offset;
 	int cnt;
 	int ret = 0;
 	int i;
 
+	data = kzalloc(sizeof(unsigned long) ,GFP_KERNEL);
+	//pr_info("sgx_vma_access addr: 0x%lx, buf: 0x%lx, len: 0x%x, write: %d", addr, (unsigned long)buf, len, write);
 	/*
 	 * If process was forked, VMA is still there but vm_private_data is set
 	 * to NULL.
