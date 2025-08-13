@@ -2,6 +2,7 @@
 #define SVSM_PROTOCOL_H
 
 #include <linux/percpu-defs.h>
+#include "arch.h"
 #include <linux/types.h>
 #include <asm/sev.h>
 #include <asm/cmpxchg.h>
@@ -23,6 +24,7 @@
 #define SVSM_ENCL_EMODT 11
 #define SVSM_ENCL_EDBGRD 12
 #define SVSM_ENCL_EDBGWR 13
+#define SVSM_ENCL_EADDB 14
 
 #define SVSM_ERR_PROTOCOL 0x80001000
 #define SVSM_ENCLAVE_PROTOCOL_BASE 800
@@ -77,6 +79,18 @@ struct sgx_eenter_args
 	u64 error_code;
 } __attribute__((packed));
 
+struct svsm_eaddb_call {
+	u16 num_entries;
+	u16 cur_index;
+
+	u8 rsvd1[4];
+
+	struct sgx_pageinfo pageinfo[];
+}__attribute__((packed));
+
 int snp_sgx_encls(unsigned long index, unsigned long rcx, unsigned long rdx, unsigned long r8);
 int snp_sgx_enclu(struct sgx_eenter_args *param);
+struct svsm_eaddb_call * get_eaddb_buffer_page(void);
+void alloc_eaddb_buffer(void);
+void release_eaddb_buffer(void);
 #endif 

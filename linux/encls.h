@@ -230,6 +230,13 @@ static inline int __eadd(u64 pginfo, u64 addr)
 	return snp_sgx_encls(SVSM_ENCL_EADD, pginfo, addr, 0);
 }
 
+static inline int __eaddb(u64 pginfo_array_addr, u64 secinfo_addr, u64 need_extend)
+{
+	//pr_info("eaddb pginfo_array_addr 0x%llx, secinfo_addr 0x%llx, need_extend 0x%llx\n", 
+	//		pginfo_array_addr, secinfo_addr, need_extend);
+	return snp_sgx_encls(SVSM_ENCL_EADDB, pginfo_array_addr, secinfo_addr, need_extend);
+}
+
 static inline int __eaug(u64 pginfo, u64 addr)
 {
 	//pr_info("eadd addr 0x%llx\n", addr);

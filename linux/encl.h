@@ -136,6 +136,8 @@ static inline bool vaddr_inside_enclave(struct sgx_encl *encl, unsigned long vad
 	return false;
 }
 
+#define SVSM_PAGEINFO_ENTRY_MAX (PAGE_SIZE / sizeof(struct sgx_pageinfo) - 1)
+
 int sgx_encl_may_map(struct sgx_encl *encl, unsigned long start,
 		     unsigned long end, unsigned long vm_flags);
 struct sgx_encl_page *sgx_encl_page_alloc(struct sgx_encl *encl,

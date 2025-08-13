@@ -14,6 +14,7 @@
 #include <linux/suspend.h>
 #include "driver.h"
 #include "encl.h"
+#include "protocol.h"
 #include "encls.h"
 
 #include <linux/version.h>
@@ -289,7 +290,7 @@ static int __sgx_encl_add_page(struct sgx_encl *encl,
 	pginfo->contents = (unsigned long)page_to_phys(src_page);
 
 	ret = __eadd(virt_to_phys(pginfo), sgx_get_epc_phys_addr(epc_page));
-	pr_info("sgx_add_page vaddr:0x%llx, paddr:0x%llx", pginfo->addr, pginfo->contents);
+	//pr_info("sgx_add_page vaddr:0x%llx, paddr:0x%llx", pginfo->addr, pginfo->contents);
 	kfree(pginfo);
 	put_page(src_page);
 
@@ -321,7 +322,7 @@ static int __sgx_encl_extend(struct sgx_encl *encl,
 	return 0;
 }
 
-static int sgx_encl_add_page(struct sgx_encl *encl, unsigned long src,
+__attribute__((unused)) static int sgx_encl_add_page(struct sgx_encl *encl, unsigned long src,
 			     unsigned long dst, struct sgx_secinfo *secinfo,
 			     unsigned long flags)
 {
@@ -381,10 +382,9 @@ static int sgx_encl_add_page(struct sgx_encl *encl, unsigned long src,
 	if (secinfo->flags & SGX_SECINFO_TCS) {
 		ret = xa_insert(&encl->tcs_array, PFN_DOWN(encl_page->desc),
 			encl_page, GFP_KERNEL);
+		if (ret)
+			goto err_out_unlock;
 	}
-
-	if (ret)
-		goto err_out_unlock;
 
 	ret = __sgx_encl_add_page(encl, encl_page, epc_page, secinfo,
 				  src);
@@ -440,6 +440,144 @@ err_out_unlock:
 	sgx_free_epc_page(epc_page);
 	kfree(encl_page);
 
+	return ret;
+}
+
+static int sgx_encl_add_page_block(struct sgx_encl *encl, unsigned long src,
+			     unsigned long dst, struct sgx_secinfo *secinfo,
+			     unsigned long flags, unsigned long page_num, unsigned long *handled_num)
+{
+	struct sgx_encl_page *encl_page;
+	struct sgx_encl_page **tmp_encl_page;
+	struct sgx_epc_page *epc_page;
+	struct sgx_epc_page **tmp_epc_page;
+	struct svsm_eaddb_call *ec;
+	struct vm_area_struct *vma;
+	struct page *src_page;
+	struct page **tmp_src_page;
+	unsigned long c, i;
+	int ret;
+
+	tmp_encl_page = kzalloc(sizeof(struct sgx_encl_page *) * page_num, GFP_KERNEL);
+	tmp_epc_page = kzalloc(sizeof(struct sgx_encl_page *) * page_num, GFP_KERNEL);
+	tmp_src_page = kzalloc(sizeof(struct page *) * page_num, GFP_KERNEL);
+	ec = get_eaddb_buffer_page();
+	if (!ec) {
+		return -EBUSY;
+	}
+	ec-> num_entries = page_num;
+	ec-> cur_index = 0;
+	mmap_read_lock(current->mm);
+	mutex_lock(&encl->lock);
+
+	// First get all the necessary resources
+	for(c = 0; c < page_num; c++) {
+		encl_page = sgx_encl_page_alloc(encl, dst + c * PAGE_SIZE, secinfo->flags);
+		if (IS_ERR(encl_page)) {
+			ret = PTR_ERR(encl_page);
+			goto err_out_unlock_prealloc;
+		}
+
+		epc_page = sgx_alloc_epc_page(encl_page, true);
+		if (IS_ERR(epc_page)) {
+			kfree(encl_page);
+			ret = PTR_ERR(epc_page);
+			goto err_out_unlock_prealloc;
+		}
+		encl->page_cnt++;
+		tmp_epc_page[c] = epc_page;
+		tmp_encl_page[c] = encl_page;
+		ret = xa_insert(&encl->page_array, PFN_DOWN(encl_page->desc),
+			encl_page, GFP_KERNEL);
+		if (ret)
+			goto err_out_unlock;
+		if (secinfo->flags & SGX_SECINFO_TCS) {
+			ret = xa_insert(&encl->tcs_array, PFN_DOWN(encl_page->desc),
+				encl_page, GFP_KERNEL);
+			if (ret)
+				goto err_out_unlock;
+		}
+		/* Deny noexec. */
+		vma = find_vma(current->mm, src + c * PAGE_SIZE);
+		if (!vma)
+			goto err_out_unlock;
+		if (!(vma->vm_flags & VM_MAYEXEC))
+			goto err_out_unlock;
+		ret = get_user_pages(src + c * PAGE_SIZE, 1, 0, &src_page);
+		if (ret < 1)
+			goto err_out_unlock;
+		tmp_src_page[c] = src_page;
+		ec->pageinfo[c].secs = (unsigned long)sgx_get_epc_phys_addr(encl->secs.epc_page);
+		ec->pageinfo[c].addr = encl_page->desc & PAGE_MASK;
+		//metadata is used for dst paddr, not secinfo here, secinfo is shared among the block
+		ec->pageinfo[c].metadata = sgx_get_epc_phys_addr(epc_page);
+		ec->pageinfo[c].contents = (unsigned long)page_to_phys(src_page);
+		encl_page->encl = encl;
+		encl_page->epc_page = epc_page;
+		encl_page->type = (secinfo->flags & SGX_SECINFO_PAGE_TYPE_MASK) >> 8;
+	}
+	
+	ret = __eaddb(virt_to_phys(ec), virt_to_phys(secinfo), flags & SGX_PAGE_MEASURE ? 1 : 0);
+	//release the user pages anyways
+	for(i = 0; i < page_num; i++) {
+		put_page(tmp_src_page[i]);
+	}
+
+	encl->secs_child_cnt += ec->cur_index;
+	*handled_num = ec->cur_index;
+	if (ret)
+		goto err_out_after_eaddb;
+
+	mutex_unlock(&encl->lock);
+	mmap_read_unlock(current->mm);
+	kfree(tmp_encl_page);
+	kfree(tmp_epc_page);
+	kfree(tmp_src_page);
+
+	return ret;
+
+err_out_unlock:
+	c++;
+err_out_unlock_prealloc:
+	pr_err("err_out_unlock_prealloc!");
+	encl->page_cnt -= c;
+	mutex_unlock(&encl->lock);
+	mmap_read_unlock(current->mm);
+	for(i = 0; i < c; i++) {
+		xa_erase(&encl->page_array, PFN_DOWN(tmp_encl_page[i]->desc));
+		if (secinfo->flags & SGX_SECINFO_TCS)
+			xa_erase(&encl->tcs_array, PFN_DOWN(tmp_encl_page[i]->desc));
+		sgx_free_epc_page_pre_eadd(tmp_epc_page[i]);
+		kfree(tmp_encl_page[i]);
+		if (tmp_src_page[i] != NULL) {
+			put_page(tmp_src_page[i]);
+		}
+	}
+
+	kfree(tmp_encl_page);
+	kfree(tmp_epc_page);
+	kfree(tmp_src_page);
+
+	return ret;
+
+// some pages maybe added, so just release the unhanded and failed part
+err_out_after_eaddb:
+	pr_err("err_out_after_eaddb!");
+	encl->page_cnt -= (page_num - ec->cur_index);
+	mutex_unlock(&encl->lock);
+	mmap_read_unlock(current->mm);
+	
+	for(i = ec->cur_index; i < page_num; i++) {
+		xa_erase(&encl->page_array, PFN_DOWN(tmp_encl_page[i]->desc));
+		if (secinfo->flags & SGX_SECINFO_TCS)
+			xa_erase(&encl->tcs_array, PFN_DOWN(tmp_encl_page[i]->desc));
+		sgx_free_epc_page_pre_eadd(tmp_epc_page[i]);
+		kfree(tmp_encl_page[i]);
+	}
+
+	kfree(tmp_encl_page);
+	kfree(tmp_epc_page);
+	kfree(tmp_src_page);
 	return ret;
 }
 
@@ -509,7 +647,7 @@ static long sgx_ioc_enclave_add_pages(struct sgx_encl *encl, void __user *arg)
 {
 	struct sgx_enclave_add_pages add_arg;
 	
-	unsigned long c;
+	unsigned long c, page_num, handled_num;
 	int ret;
 
 	if (!test_bit(SGX_ENCL_CREATED, &encl->flags) ||
@@ -544,8 +682,9 @@ static long sgx_ioc_enclave_add_pages(struct sgx_encl *encl, void __user *arg)
 		ret = -EINVAL;
 		goto out;
 	}
-
-	for (c = 0 ; c < add_arg.length; c += PAGE_SIZE) {
+	// pr_info("eadd arg src:0x%llx, dst:0x%llx, length:0x%llx", add_arg.src, add_arg.dst, add_arg.length);
+	// Do eadd in batch for optimization
+	for (c = 0 ; c < add_arg.length; ) {
 		if (signal_pending(current)) {
 			if (!c)
 				ret = -ERESTARTSYS;
@@ -555,12 +694,20 @@ static long sgx_ioc_enclave_add_pages(struct sgx_encl *encl, void __user *arg)
 
 		if (need_resched())
 			cond_resched();
-		ret = sgx_encl_add_page(encl, add_arg.src + c, add_arg.dst + c,
-					secinfo, add_arg.flags);
+		handled_num = 0;
+		
+		page_num = c + PAGE_SIZE * SVSM_PAGEINFO_ENTRY_MAX <= add_arg.length ?
+					SVSM_PAGEINFO_ENTRY_MAX : (add_arg.length - c) / PAGE_SIZE;
+		//pr_info("sgx_encl_add_page_block src: 0x%llx, dst: 0x%llx, page_num: %ld", add_arg.src + c, add_arg.dst + c, page_num);
+		ret = sgx_encl_add_page_block(encl, add_arg.src + c, add_arg.dst + c,
+					secinfo, add_arg.flags, page_num, &handled_num);
+		c += handled_num * PAGE_SIZE;
 		if (ret)
+		{
+			pr_err("sgx_encl_add_page_block ret is %d current c is 0x%lx",ret,c);
 			break;
+		}
 	}
-
 	add_arg.count = c;
 
 	if (copy_to_user(arg, &add_arg, sizeof(add_arg))) {

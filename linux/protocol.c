@@ -4,6 +4,7 @@
 #include "encls.h"
 
 static DEFINE_PER_CPU(struct svsm_ca *, svsm_caa) = NULL;
+static DEFINE_PER_CPU(struct svsm_eaddb_call *, eaddb_buffer) = NULL;
 static DEFINE_PER_CPU(u64, svsm_caa_pa);
 
 static inline u64 sev_snp_rd_caa_msr(void)
@@ -160,7 +161,7 @@ int snp_sgx_enclu(struct sgx_eenter_args *param)
     }
 
 	call.caa = caa;
-	call.rcx = caa_pa + offsetof(struct svsm_ca, svsm_buffer);;
+	call.rcx = caa_pa + offsetof(struct svsm_ca, svsm_buffer);
 	call.rax = SVSM_ENCL_CALL(SVSM_ENCL_ENCLU);
 
 	caa_param = (struct sgx_eenter_args *)caa->svsm_buffer;
@@ -171,4 +172,38 @@ int snp_sgx_enclu(struct sgx_eenter_args *param)
 		*param = *caa_param;
 	}
 	return ret;
+}
+
+struct svsm_eaddb_call * get_eaddb_buffer_page(void)
+{
+	struct svsm_eaddb_call *buffer;
+
+	buffer = this_cpu_read(eaddb_buffer);
+	
+	return buffer;
+}
+
+void alloc_eaddb_buffer(void)
+{
+	int cpu;
+	struct svsm_eaddb_call *buffer;
+
+	for_each_possible_cpu(cpu) {
+		buffer = kzalloc(PAGE_SIZE, GFP_KERNEL);
+        per_cpu(eaddb_buffer, cpu) = buffer;
+    }
+}
+
+void release_eaddb_buffer(void)
+{
+	int cpu;
+	struct svsm_eaddb_call *buffer;
+
+	for_each_possible_cpu(cpu) {
+		buffer = per_cpu(eaddb_buffer, cpu);
+		if (buffer) {
+			kfree(buffer); 
+		}
+        per_cpu(eaddb_buffer, cpu) = NULL;
+    }
 }

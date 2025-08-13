@@ -782,6 +782,23 @@ void sgx_free_epc_page(struct sgx_epc_page *epc_page)
 	vfree(epc_page);
 }
 
+/**
+ * sgx_free_epc_page_pre_eadd() - Free an EPC page
+ * @page:	an EPC page
+ *
+ * free the allocated epc_page struct, do not call eremove
+ */
+void sgx_free_epc_page_pre_eadd(struct sgx_epc_page *epc_page)
+{
+	struct page *page = pfn_to_page(epc_page->pfn);
+
+	spin_lock(&sgx_page_pool_lock);
+	list_del_init(&epc_page->list);
+	spin_unlock(&sgx_page_pool_lock);
+	__free_page(page);
+	vfree(epc_page);
+}
+
 /*
 static bool __init sgx_setup_epc_section(u64 phys_addr, u64 size,
 					 unsigned long index,
@@ -1003,7 +1020,7 @@ static void handle_pf(struct pt_regs *regs,
 
 	tsk = current;
 	mm = tsk->mm;
-	pr_info("try to handle pf address:%lx, error_code: %lx", address, error_code);
+	//pr_info("try to handle pf address:%lx, error_code: %lx", address, error_code);
 	if (error_code & X86_PF_WRITE)
 		flags |= FAULT_FLAG_WRITE;
 	if (error_code & X86_PF_INSTR)
@@ -1024,7 +1041,7 @@ retry:
 
 	fault = handle_mm_fault(vma, address, flags, regs);
 
-	pr_info("handle_mm_fault return value %x", fault);
+	//pr_info("handle_mm_fault return value %x", fault);
 
 	// If VM_FAULT_COMPLETED is set, mmap_lock is released
 	if (fault & VM_FAULT_COMPLETED)
@@ -1070,26 +1087,26 @@ retry:
 			if (!pte)
 			{
 				pr_err("Cannot get the pte of a user address!\n");
-				goto sync_fail;
+				goto sync_fail_page;
 			}
 
 			paddr = pte_pfn(*pte) << PAGE_SHIFT;
 
 			ret = sgx_encl_esync(encl, paddr, address & PAGE_MASK, pte_present(*pte),
 								 pte_write(*pte), pte_exec(*pte));
-			pr_info("esync address: 0x%lx, paddr: 0x%llx, pte: 0x%lx", address, paddr, pte->pte);
+			//pr_info("esync address: 0x%lx, paddr: 0x%llx, pte: 0x%lx", address, paddr, pte->pte);
 			if (ret)
 			{
 				pr_err("esync has an error with vaddr:0x%lx, paddr:0x%llx, rwx: %d%d%d\n",
 					   address, paddr, pte_present(*pte), pte_write(*pte), pte_exec(*pte));
-				goto sync_fail;
+				goto sync_fail_page;
 			}
 
 			sync_entry = kzalloc(sizeof(struct sgx_encl_sync_page), GFP_KERNEL);
 			if (!sync_entry)
 			{
 				pr_err("esync OOM");
-				goto sync_fail;
+				goto sync_fail_page;
 			}
 
 			encl->sync_page_cnt++;
@@ -1098,9 +1115,10 @@ retry:
 			if (ret)
 			{
 				pr_err("esync xa insert index 0x%lx failed", PFN_DOWN(address));
-				goto sync_fail;
+				goto sync_fail_page;
 			}
 			mutex_unlock(&encl->lock);
+			put_page(page);
 		}
 		up_read(&mm->mmap_lock);
 		return;
@@ -1137,9 +1155,12 @@ retry:
 
 	return;
 
+sync_fail_page:
+	put_page(page);
 sync_fail:
 	force_sig(SIGKILL);
 	mutex_unlock(&encl->lock);
+	up_read(&mm->mmap_lock);
 	return;
 }
 
@@ -1159,7 +1180,8 @@ static void do_trap(int trapnr, int signr, struct pt_regs *regs,
 	*/
 }
 
-static void dump_sgx_args(struct sgx_eenter_args *args)
+static __attribute__((unused))
+void dump_sgx_args(struct sgx_eenter_args *args)
 {
 	trace_printk("SGX EENTER args:\n");
 	trace_printk("  tcs_paddr = 0x%016llx\n", args->tcs_paddr);
@@ -1194,7 +1216,7 @@ static void emulate_enclu(struct pt_regs *regs)
 	mm = tsk->mm;
 
 	tcs_vaddr = regs->bx;
-	pr_info("tcs_vaddr :%llx", tcs_vaddr);
+	//pr_info("tcs_vaddr :%llx", tcs_vaddr);
 	encl = get_encl_from_vaddr(tcs_vaddr);
 	if (!encl)
 	{
@@ -1231,15 +1253,15 @@ static void emulate_enclu(struct pt_regs *regs)
 	param.rip = regs->ip;
 	param.rflags = regs->flags;
 
-	trace_printk("input param: ");
-	dump_sgx_args(&param);
+	//trace_printk("input param: ");
+	//dump_sgx_args(&param);
 	// TODO: error is hiden here, should return exact error if enclu failed
 	//       now just return GP.
-	pr_info("run enclu");
+	//pr_info("run enclu");
 	ret = snp_sgx_enclu(&param);
-	pr_info("return from enclu");
-	trace_printk("output param: ");
-	dump_sgx_args(&param);
+	//pr_info("return from enclu");
+	//trace_printk("output param: ");
+	//dump_sgx_args(&param);
 	if (ret)
 	{
 		pr_err("enclu failed");
@@ -1270,7 +1292,7 @@ static void emulate_enclu(struct pt_regs *regs)
 	case EXIT_REASON_INTERRUPT:
 		current->thread.trap_nr = param.vector;
 		current->thread.error_code = param.error_code;
-		trace_printk("EXIT_REASON_INTERRUPT vector:%lld", param.vector);
+		//pr_info("EXIT_REASON_INTERRUPT vector:%lld", param.vector);
 		switch (param.vector)
 		{
 		case X86_TRAP_DE:
@@ -1321,7 +1343,7 @@ static void emulate_enclu(struct pt_regs *regs)
 		}
 		break;
 	case EXIT_REASON_EEXIT:
-		pr_info("EXIT_REASON_EEXIT");
+		//pr_info("EXIT_REASON_EEXIT");
 		break;
 	default:
 		break;
@@ -1345,7 +1367,7 @@ static int handle_die_event(struct notifier_block *self,
 
 		if (buf[0] == 0x0f && buf[1] == 0x01 && buf[2] == 0xd7)
 		{
-			pr_info("handle_die_event emulate");
+			//pr_info("handle_die_event emulate");
 			emulate_enclu(regs);
 			return NOTIFY_STOP;
 		}
@@ -1400,7 +1422,7 @@ static int __init sgx_init(void)
 	// goto err_kthread;
 
 	pr_info(DRV_DESCRIPTION " v" DRV_VERSION "\n");
-
+	alloc_eaddb_buffer();
 	register_sgx_die_notifier();
 	return 0;
 
@@ -1436,6 +1458,7 @@ static void __exit sgx_exit(void)
 	spin_unlock(&sgx_page_pool_lock);
 
 	unregister_sgx_die_notifier();
+	release_eaddb_buffer();
 	pr_info(DRV_DESCRIPTION " v" DRV_VERSION " removed\n");
 	/*
 	for (i = 0; i < sgx_nr_epc_sections; i++) {
