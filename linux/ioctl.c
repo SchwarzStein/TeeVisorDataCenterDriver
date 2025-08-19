@@ -234,7 +234,7 @@ static int sgx_validate_secinfo(struct sgx_secinfo *secinfo)
 	u64 perm = secinfo->flags & SGX_SECINFO_PERMISSION_MASK;
 	u64 pt   = secinfo->flags & SGX_SECINFO_PAGE_TYPE_MASK;
 
-	if (pt != SGX_SECINFO_REG && pt != SGX_SECINFO_TCS)
+	if (pt != SGX_SECINFO_REG && pt != SGX_SECINFO_TCS && pt != SGX_SECINFO_HANDLER)
 		return -EINVAL;
 
 	if ((perm & SGX_SECINFO_W) && !(perm & SGX_SECINFO_R))
@@ -663,11 +663,19 @@ static long sgx_ioc_enclave_add_pages(struct sgx_encl *encl, void __user *arg)
 
 	if (!add_arg.length || add_arg.length & (PAGE_SIZE - 1))
 		return -EINVAL;
-
 	add_arg.dst = add_arg.dst + encl->base;
-	if (!(((add_arg.dst >= encl->base) && (add_arg.dst + add_arg.length <= encl->base + encl->size))
+
+	// If two areas are adjacent
+	if (encl->base + encl->size == encl->runtime_base) {
+		if (add_arg.dst < encl->base || add_arg.dst + add_arg.length > encl->runtime_base + encl->runtime_size)
+			return -EINVAL;
+	} else if (!(((add_arg.dst >= encl->base) && (add_arg.dst + add_arg.length <= encl->base + encl->size))
 		|| ((add_arg.dst >= encl->runtime_base) && (add_arg.dst + add_arg.length <= encl->runtime_base + encl->runtime_size))))
-		return -EINVAL;
+		{
+			pr_err("2");
+			return -EINVAL;
+		}
+		
 	//if (add_arg.dst + add_arg.length - PAGE_SIZE >= encl->size)
 	//	return -EINVAL;
 
