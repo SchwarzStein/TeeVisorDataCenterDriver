@@ -156,8 +156,8 @@ const struct file_operations sgx_provision_fops = {
 
 static struct miscdevice sgx_dev_enclave = {
 	.minor = MISC_DYNAMIC_MINOR,
-	.name = "teevisor",
-	.nodename = "teevisor",
+	.name = "sgx_enclave",
+	.nodename = "sgx_enclave",
 	.fops = &sgx_encl_fops,
 	.mode = 0666,
 };
