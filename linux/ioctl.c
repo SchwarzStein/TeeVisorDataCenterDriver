@@ -598,8 +598,15 @@ static int sgx_validate_offset_length(struct sgx_encl *encl,
 	if (offset + length < offset)
 		return -EINVAL;
 
-	if (offset + length - PAGE_SIZE >= encl->size)
-		return -EINVAL;
+	if (encl->runtime_size == 0) {
+		if (offset + length - PAGE_SIZE >= encl->size) {
+			return -EINVAL;
+		} 	
+	} else {
+		if (offset + length - PAGE_SIZE >= encl->runtime_base - encl->base + encl->runtime_size) {
+			return -EINVAL;
+		}
+	}
 
 	return 0;
 }
