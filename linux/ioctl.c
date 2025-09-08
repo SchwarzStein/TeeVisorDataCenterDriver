@@ -223,6 +223,9 @@ struct sgx_encl_page *sgx_encl_page_alloc(struct sgx_encl *encl,
 	if ((secinfo_flags & SGX_SECINFO_PAGE_TYPE_MASK) == SGX_SECINFO_TCS)
 		prot |= PROT_READ | PROT_WRITE;
 
+	if ((secinfo_flags & SGX_SECINFO_PAGE_TYPE_MASK) == SGX_SECINFO_HANDLER)
+		prot |= PROT_READ | PROT_EXEC;
+
 	/* Calculate maximum of the VM flags for the page. */
 	encl_page->vm_max_prot_bits = calc_vm_prot_bits(prot, 0);
 
