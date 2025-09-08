@@ -808,7 +808,6 @@ static int sgx_encl_init(struct sgx_encl *encl, struct sgx_sigstruct *sigstruct,
 
 	if (ret) {
 		pr_info("EINIT returned %d\n", ret);
-		ret = -EPERM;
 	} else {
 		set_bit(SGX_ENCL_INITIALIZED, &encl->flags);
 	}
