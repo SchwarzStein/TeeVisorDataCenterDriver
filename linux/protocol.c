@@ -108,10 +108,10 @@ static int svsm_perform_call_protocol(struct svsm_call *call, u64 target_vmpl)
 
 	ret = svsm_perform_msr_protocol(call, target_vmpl);
 
-    if (ret)
-	{
-		pr_err("svsm_perform_call_protocol failed with ret=%d\n", ret);
-	}
+    // if (ret)
+	// {
+	//    pr_err("svsm_perform_call_protocol id %llx failed with ret=0x%x\n",call->rax, ret);
+	// }
 
 	native_local_irq_restore(flags);
 
