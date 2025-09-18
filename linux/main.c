@@ -1093,7 +1093,7 @@ retry:
 			paddr = pte_pfn(*pte) << PAGE_SHIFT;
 
 			ret = sgx_encl_esync(encl, paddr, address & PAGE_MASK, pte_present(*pte),
-								 pte_write(*pte), pte_exec(*pte));
+								 pte_write(*pte), false);
 			//pr_info("esync address: 0x%lx, paddr: 0x%llx, pte: 0x%lx", address, paddr, pte->pte);
 			if (ret)
 			{
@@ -1335,6 +1335,7 @@ static void emulate_enclu(struct pt_regs *regs)
 		// NMI should be injected back again by the svsm firmware,
 		// and continue executing
 		case X86_TRAP_NMI:
+			pr_err("nmi\n");
 			break;
 		default:
 			pr_err("Unexpected interrupt %lld in enclave\n", param.vector);
