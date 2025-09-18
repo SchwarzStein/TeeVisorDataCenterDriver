@@ -22,7 +22,7 @@
 #include "main.h"
 
 static const uint64_t MAGIC = 0x1122334455667788ULL;
-//static const uint64_t MAGIC2 = 0x8877665544332211ULL;
+static const uint64_t MAGIC2 = 0x8877665544332211ULL;
 vdso_sgx_enter_enclave_t vdso_sgx_enter_enclave;
 
 /*
@@ -154,7 +154,7 @@ static off_t encl_get_tcs_offset(struct encl *encl)
  * The first RW segment loaded is the TCS, skip that to get info on the
  * data segment.
  */
-/*
+
 static off_t encl_get_data_offset(struct encl *encl)
 {
 	int i;
@@ -168,13 +168,13 @@ static off_t encl_get_data_offset(struct encl *encl)
 
 	return -1;
 }
-*/
+
 FIXTURE(enclave) {
 	struct encl encl;
 	struct sgx_enclave_run run;
 };
 
-static bool setup_test_encl(unsigned long heap_size, struct encl *encl,
+static bool setup_test_encl_debug(unsigned long heap_size, struct encl *encl,
 			    struct __test_metadata *_metadata)
 {
 	Elf64_Sym *sgx_enter_enclave_sym = NULL;
@@ -191,10 +191,10 @@ static bool setup_test_encl(unsigned long heap_size, struct encl *encl,
 		return false;
 	}
 
-	if (!encl_measure(encl))
+	if (!encl_measure_debug(encl))
 		goto err;
 
-	if (!encl_build(encl))
+	if (!encl_build_debug(encl))
 		goto err;
 
 	/*
@@ -252,6 +252,84 @@ err:
 	return false;
 }
 
+// static bool setup_test_encl(unsigned long heap_size, struct encl *encl,
+// 			    struct __test_metadata *_metadata)
+// {
+// 	Elf64_Sym *sgx_enter_enclave_sym = NULL;
+// 	struct vdso_symtab symtab;
+// 	struct encl_segment *seg;
+// 	char maps_line[256];
+// 	FILE *maps_file;
+// 	unsigned int i;
+// 	void *addr;
+
+// 	if (!encl_load("test_encl.elf", encl, heap_size)) {
+// 		encl_delete(encl);
+// 		TH_LOG("Failed to load the test enclave.");
+// 		return false;
+// 	}
+
+// 	if (!encl_measure(encl))
+// 		goto err;
+
+// 	if (!encl_build(encl))
+// 		goto err;
+
+// 	/*
+// 	 * An enclave consumer only must do this.
+// 	 */
+// 	for (i = 0; i < encl->nr_segments; i++) {
+// 		struct encl_segment *seg = &encl->segment_tbl[i];
+
+// 		addr = mmap((void *)encl->encl_base + seg->offset, seg->size,
+// 			    seg->prot, MAP_SHARED | MAP_FIXED, encl->fd, 0);
+// 		EXPECT_NE(addr, MAP_FAILED);
+// 		if (addr == MAP_FAILED)
+// 			goto err;
+// 	}
+
+// 	/* Get vDSO base address */
+// 	addr = (void *)getauxval(AT_SYSINFO_EHDR);
+// 	if (!addr)
+// 		goto err;
+
+// 	if (!vdso_get_symtab(addr, &symtab))
+// 		goto err;
+
+// 	sgx_enter_enclave_sym = vdso_symtab_get(&symtab, "__vdso_sgx_enter_enclave");
+// 	if (!sgx_enter_enclave_sym)
+// 		goto err;
+
+// 	vdso_sgx_enter_enclave = addr + sgx_enter_enclave_sym->st_value;
+
+// 	return true;
+
+// err:
+// 	for (i = 0; i < encl->nr_segments; i++) {
+// 		seg = &encl->segment_tbl[i];
+
+// 		TH_LOG("0x%016lx 0x%016lx 0x%02x", seg->offset, seg->size, seg->prot);
+// 	}
+
+// 	maps_file = fopen("/proc/self/maps", "r");
+// 	if (maps_file != NULL)  {
+// 		while (fgets(maps_line, sizeof(maps_line), maps_file) != NULL) {
+// 			maps_line[strlen(maps_line) - 1] = '\0';
+
+// 			if (strstr(maps_line, "/dev/sgx_enclave"))
+// 				TH_LOG("%s", maps_line);
+// 		}
+
+// 		fclose(maps_file);
+// 	}
+
+// 	TH_LOG("Failed to initialize the test enclave.");
+
+// 	encl_delete(encl);
+
+// 	return false;
+// }
+
 FIXTURE_SETUP(enclave)
 {
 }
@@ -281,33 +359,6 @@ FIXTURE_TEARDOWN(enclave)
 			       (run)->exception_error_code, (run)->exception_addr); \
 	} while (0)
 
-TEST_F(enclave, unclobbered_vdso)
-{
-	struct encl_op_get_from_buf get_op;
-	struct encl_op_put_to_buf put_op;
-
-	ASSERT_TRUE(setup_test_encl(ENCL_HEAP_SIZE_DEFAULT, &self->encl, _metadata));
-
-	memset(&self->run, 0, sizeof(self->run));
-	self->run.tcs = self->encl.encl_base;
-
-	put_op.header.type = ENCL_OP_PUT_TO_BUFFER;
-	put_op.value = MAGIC;
-
-	EXPECT_EQ(ENCL_CALL(&put_op, &self->run, false), 0);
-
-	EXPECT_EEXIT(&self->run);
-	EXPECT_EQ(self->run.user_data, 0);
-
-	get_op.header.type = ENCL_OP_GET_FROM_BUFFER;
-	get_op.value = 0;
-
-	EXPECT_EQ(ENCL_CALL(&get_op, &self->run, false), 0);
-
-	EXPECT_EQ(get_op.value, MAGIC);
-	EXPECT_EEXIT(&self->run);
-	EXPECT_EQ(self->run.user_data, 0);
-}
 
 /*
  * A section metric is concatenated in a way that @low bits 12-31 define the
@@ -354,184 +405,76 @@ static unsigned long get_total_epc_mem(void)
 }
 */
 
-TEST_F(enclave, unclobbered_vdso_oversubscribed)
+TEST_F(enclave, debug_read_write)
 {
-	struct encl_op_get_from_buf get_op;
-	struct encl_op_put_to_buf put_op;
-	unsigned long total_mem = TEST_MEM_SIZE;
+	struct encl_op_get_from_addr get_addr_op;
+	struct encl_op_put_to_addr put_addr_op;
+	unsigned long data_start;
+	unsigned long val;
+	size_t n;
+	int fd;
 
-	//total_mem = get_total_epc_mem();
-	//ASSERT_NE(total_mem, 0);
-	ASSERT_TRUE(setup_test_encl(total_mem, &self->encl, _metadata));
+	ASSERT_TRUE(setup_test_encl_debug(ENCL_HEAP_SIZE_DEFAULT, &self->encl, _metadata));
 
 	memset(&self->run, 0, sizeof(self->run));
 	self->run.tcs = self->encl.encl_base;
 
-	put_op.header.type = ENCL_OP_PUT_TO_BUFFER;
-	put_op.value = MAGIC;
-
-	EXPECT_EQ(ENCL_CALL(&put_op, &self->run, false), 0);
-
-	EXPECT_EEXIT(&self->run);
-	EXPECT_EQ(self->run.user_data, 0);
-
-	get_op.header.type = ENCL_OP_GET_FROM_BUFFER;
-	get_op.value = 0;
-
-	EXPECT_EQ(ENCL_CALL(&get_op, &self->run, false), 0);
-
-	EXPECT_EQ(get_op.value, MAGIC);
-	EXPECT_EEXIT(&self->run);
-	EXPECT_EQ(self->run.user_data, 0);
-}
-
-TEST_F_TIMEOUT(enclave, unclobbered_vdso_oversubscribed_remove, 900)
-{
-	struct sgx_enclave_remove_pages remove_ioc;
-	struct sgx_enclave_modify_types modt_ioc;
-	struct encl_op_get_from_buf get_op;
-	struct encl_op_eaccept eaccept_op;
-	struct encl_op_put_to_buf put_op;
-	struct encl_segment *heap;
-	unsigned long total_mem = TEST_MEM_SIZE;
-	int ret, errno_save;
-	unsigned long addr;
-	unsigned long i;
+	data_start = self->encl.encl_base +
+		     encl_get_data_offset(&self->encl) +
+		     PAGE_SIZE;
 
 	/*
-	 * Create enclave with additional heap that is as big as all
-	 * available physical SGX memory.
+	 * Sanity check to ensure it is possible to write to page that will
+	 * have its permissions manipulated.
 	 */
-	//total_mem = get_total_epc_mem();
-	//ASSERT_NE(total_mem, 0);
-	TH_LOG("Creating an enclave with %lu bytes heap may take a while ...",
-	       total_mem);
-	ASSERT_TRUE(setup_test_encl(total_mem, &self->encl, _metadata));
 
-	/*
-	 * Hardware (SGX2) and kernel support is needed for this test. Start
-	 * with check that test has a chance of succeeding.
-	 */
-	memset(&modt_ioc, 0, sizeof(modt_ioc));
-	ret = ioctl(self->encl.fd, SGX_IOC_ENCLAVE_MODIFY_TYPES, &modt_ioc);
+	/* Write MAGIC to page */
+	put_addr_op.value = MAGIC;
+	put_addr_op.addr = data_start;
+	put_addr_op.header.type = ENCL_OP_PUT_TO_ADDRESS;
 
-	if (ret == -1) {
-		if (errno == ENOTTY)
-			SKIP(return,
-			     "Kernel does not support SGX_IOC_ENCLAVE_MODIFY_TYPES ioctl()");
-		else if (errno == ENODEV)
-			SKIP(return, "System does not support SGX2");
+	EXPECT_EQ(ENCL_CALL(&put_addr_op, &self->run, true), 0);
+
+	EXPECT_EEXIT(&self->run);
+	EXPECT_EQ(self->run.exception_vector, 0);
+	EXPECT_EQ(self->run.exception_error_code, 0);
+	EXPECT_EQ(self->run.exception_addr, 0);
+
+	TH_LOG("write MAGIC to addr 0x%lx", data_start);
+	fd = open("/proc/self/mem", O_RDWR);
+	if (fd < 0) {
+        TH_LOG("open /proc/self/mem failed");
+		return;
+    }
+	n = pread64(fd, &val, sizeof(val), data_start);
+	if (n < 0) {
+		TH_LOG("debug read failed");
+		return;
 	}
-
-	/*
-	 * Invalid parameters were provided during sanity check,
-	 * expect command to fail.
-	 */
-	EXPECT_EQ(ret, -1);
-
-	/* SGX2 is supported by kernel and hardware, test can proceed. */
-	memset(&self->run, 0, sizeof(self->run));
-	self->run.tcs = self->encl.encl_base;
-
-	heap = &self->encl.segment_tbl[self->encl.nr_segments - 1];
-
-	put_op.header.type = ENCL_OP_PUT_TO_BUFFER;
-	put_op.value = MAGIC;
-
-	EXPECT_EQ(ENCL_CALL(&put_op, &self->run, false), 0);
-
-	EXPECT_EEXIT(&self->run);
-	EXPECT_EQ(self->run.user_data, 0);
-
-	get_op.header.type = ENCL_OP_GET_FROM_BUFFER;
-	get_op.value = 0;
-
-	EXPECT_EQ(ENCL_CALL(&get_op, &self->run, false), 0);
-
-	EXPECT_EQ(get_op.value, MAGIC);
-	EXPECT_EEXIT(&self->run);
-	EXPECT_EQ(self->run.user_data, 0);
-
-	/* Trim entire heap. */
-	memset(&modt_ioc, 0, sizeof(modt_ioc));
-
-	modt_ioc.offset = heap->offset;
-	modt_ioc.length = heap->size;
-	modt_ioc.page_type = SGX_PAGE_TYPE_TRIM;
-
-	TH_LOG("Changing type of %zd bytes to trimmed may take a while ...",
-	       heap->size);
-	ret = ioctl(self->encl.fd, SGX_IOC_ENCLAVE_MODIFY_TYPES, &modt_ioc);
-	errno_save = ret == -1 ? errno : 0;
-
-	EXPECT_EQ(ret, 0);
-	EXPECT_EQ(errno_save, 0);
-	EXPECT_EQ(modt_ioc.result, 0);
-	EXPECT_EQ(modt_ioc.count, heap->size);
-
-	/* EACCEPT all removed pages. */
-	addr = self->encl.encl_base + heap->offset;
-
-	eaccept_op.flags = SGX_SECINFO_TRIM | SGX_SECINFO_MODIFIED;
-	eaccept_op.header.type = ENCL_OP_EACCEPT;
-
-	TH_LOG("Entering enclave to run EACCEPT for each page of %zd bytes may take a while ...",
-	       heap->size);
-	for (i = 0; i < heap->size; i += 4096) {
-		eaccept_op.epc_addr = addr + i;
-		eaccept_op.ret = 0;
-
-		EXPECT_EQ(ENCL_CALL(&eaccept_op, &self->run, true), 0);
-
-		EXPECT_EQ(self->run.exception_vector, 0);
-		EXPECT_EQ(self->run.exception_error_code, 0);
-		EXPECT_EQ(self->run.exception_addr, 0);
-		ASSERT_EQ(eaccept_op.ret, 0);
-		ASSERT_EQ(self->run.function, EEXIT);
+	TH_LOG("debug read MAGIC");
+	EXPECT_EQ(MAGIC, val);
+	val = MAGIC2;
+	n = pwrite64(fd, &val, sizeof(val), data_start);
+	if (n < 0) {
+		TH_LOG("debug write failed");
+		return;
 	}
+	TH_LOG("debug write MAGIC2");
+	/*
+	 * Read memory that was just written to, confirming that it is the
+	 * value previously written (MAGIC).
+	 */
+	get_addr_op.value = 0;
+	get_addr_op.addr = data_start;
+	get_addr_op.header.type = ENCL_OP_GET_FROM_ADDRESS;
 
-	/* Complete page removal. */
-	memset(&remove_ioc, 0, sizeof(remove_ioc));
+	EXPECT_EQ(ENCL_CALL(&get_addr_op, &self->run, true), 0);
 
-	remove_ioc.offset = heap->offset;
-	remove_ioc.length = heap->size;
-
-	TH_LOG("Removing %zd bytes from enclave may take a while ...",
-	       heap->size);
-	ret = ioctl(self->encl.fd, SGX_IOC_ENCLAVE_REMOVE_PAGES, &remove_ioc);
-	errno_save = ret == -1 ? errno : 0;
-
-	EXPECT_EQ(ret, 0);
-	EXPECT_EQ(errno_save, 0);
-	EXPECT_EQ(remove_ioc.count, heap->size);
-}
-
-TEST_F(enclave, clobbered_vdso)
-{
-	struct encl_op_get_from_buf get_op;
-	struct encl_op_put_to_buf put_op;
-
-	ASSERT_TRUE(setup_test_encl(ENCL_HEAP_SIZE_DEFAULT, &self->encl, _metadata));
-
-	memset(&self->run, 0, sizeof(self->run));
-	self->run.tcs = self->encl.encl_base;
-
-	put_op.header.type = ENCL_OP_PUT_TO_BUFFER;
-	put_op.value = MAGIC;
-
-	EXPECT_EQ(ENCL_CALL(&put_op, &self->run, true), 0);
-
+	EXPECT_EQ(get_addr_op.value, MAGIC2);
 	EXPECT_EEXIT(&self->run);
-	EXPECT_EQ(self->run.user_data, 0);
-
-	get_op.header.type = ENCL_OP_GET_FROM_BUFFER;
-	get_op.value = 0;
-
-	EXPECT_EQ(ENCL_CALL(&get_op, &self->run, true), 0);
-
-	EXPECT_EQ(get_op.value, MAGIC);
-	EXPECT_EEXIT(&self->run);
-	EXPECT_EQ(self->run.user_data, 0);
+	EXPECT_EQ(self->run.exception_vector, 0);
+	EXPECT_EQ(self->run.exception_error_code, 0);
+	EXPECT_EQ(self->run.exception_addr, 0);
 }
 
 

@@ -389,3 +389,82 @@ err:
 	RSA_free(key);
 	return false;
 }
+
+bool encl_measure_debug(struct encl *encl)
+{
+	uint64_t header1[2] = {0x000000E100000006, 0x0000000000010000};
+	uint64_t header2[2] = {0x0000006000000101, 0x0000000100000060};
+	struct sgx_sigstruct *sigstruct = &encl->sigstruct;
+	struct sgx_sigstruct_payload payload;
+	uint8_t digest[SHA256_DIGEST_LENGTH];
+	EVP_MD_CTX *ctx = NULL;
+	unsigned int siglen;
+	RSA *key = NULL;
+	int i;
+
+	memset(sigstruct, 0, sizeof(*sigstruct));
+
+	sigstruct->header.header1[0] = header1[0];
+	sigstruct->header.header1[1] = header1[1];
+	sigstruct->header.header2[0] = header2[0];
+	sigstruct->header.header2[1] = header2[1];
+	sigstruct->exponent = 3;
+	sigstruct->body.attributes = SGX_ATTR_MODE64BIT | SGX_ATTR_DEBUG;
+	sigstruct->body.xfrm = 3;
+
+	/* sanity check */
+	if (check_crypto_errors())
+		goto err;
+
+	key = gen_sign_key();
+	if (!key) {
+		ERR_print_errors_fp(stdout);
+		goto err;
+	}
+
+	BN_bn2bin(get_modulus(key), sigstruct->modulus);
+
+	ctx = EVP_MD_CTX_create();
+	if (!ctx)
+		goto err;
+
+	if (!mrenclave_ecreate(ctx, encl->src_size))
+		goto err;
+
+	for (i = 0; i < encl->nr_segments; i++) {
+		struct encl_segment *seg = &encl->segment_tbl[i];
+
+		if (!mrenclave_segment(ctx, encl, seg))
+			goto err;
+	}
+
+	if (!mrenclave_commit(ctx, sigstruct->body.mrenclave))
+		goto err;
+
+	memcpy(&payload.header, &sigstruct->header, sizeof(sigstruct->header));
+	memcpy(&payload.body, &sigstruct->body, sizeof(sigstruct->body));
+
+	SHA256((unsigned char *)&payload, sizeof(payload), digest);
+
+	if (!RSA_sign(NID_sha256, digest, SHA256_DIGEST_LENGTH,
+		      sigstruct->signature, &siglen, key))
+		goto err;
+
+	if (!calc_q1q2(sigstruct->signature, sigstruct->modulus, sigstruct->q1,
+		       sigstruct->q2))
+		goto err;
+
+	/* BE -> LE */
+	reverse_bytes(sigstruct->signature, SGX_MODULUS_SIZE);
+	reverse_bytes(sigstruct->modulus, SGX_MODULUS_SIZE);
+
+	EVP_MD_CTX_destroy(ctx);
+	RSA_free(key);
+	return true;
+
+err:
+	if (ctx)
+		EVP_MD_CTX_destroy(ctx);
+	RSA_free(key);
+	return false;
+}

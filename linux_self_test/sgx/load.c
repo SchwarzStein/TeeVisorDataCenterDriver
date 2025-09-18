@@ -103,6 +103,32 @@ static bool encl_ioc_create(struct encl *encl)
 	return true;
 }
 
+static bool encl_ioc_create_debug(struct encl *encl)
+{
+	struct sgx_secs *secs = &encl->secs;
+	struct sgx_enclave_create ioc;
+	int rc;
+
+	assert(encl->encl_base != 0);
+
+	memset(secs, 0, sizeof(*secs));
+	secs->ssa_frame_size = 1;
+	secs->attributes = SGX_ATTR_MODE64BIT | SGX_ATTR_DEBUG;
+	secs->xfrm = 3;
+	secs->base = encl->encl_base;
+	secs->size = encl->encl_size;
+
+	ioc.src = (unsigned long)secs;
+	rc = ioctl(encl->fd, SGX_IOC_ENCLAVE_CREATE, &ioc);
+	if (rc) {
+		perror("SGX_IOC_ENCLAVE_CREATE failed");
+		munmap((void *)secs->base, encl->encl_size);
+		return false;
+	}
+
+	return true;
+}
+
 static bool encl_ioc_add_pages(struct encl *encl, struct encl_segment *seg)
 {
 	struct sgx_enclave_add_pages ioc;
@@ -346,6 +372,39 @@ bool encl_build(struct encl *encl)
 		return false;
 
 	if (!encl_ioc_create(encl))
+		return false;
+
+	/*
+	 * Pages must be added before mapping VMAs because their permissions
+	 * cap the VMA permissions.
+	 */
+	for (i = 0; i < encl->nr_segments; i++) {
+		struct encl_segment *seg = &encl->segment_tbl[i];
+
+		if (!encl_ioc_add_pages(encl, seg))
+			return false;
+	}
+
+	ioc.sigstruct = (uint64_t)&encl->sigstruct;
+	ret = ioctl(encl->fd, SGX_IOC_ENCLAVE_INIT, &ioc);
+	if (ret) {
+		perror("SGX_IOC_ENCLAVE_INIT failed");
+		return false;
+	}
+
+	return true;
+}
+
+bool encl_build_debug(struct encl *encl)
+{
+	struct sgx_enclave_init ioc;
+	int ret;
+	int i;
+
+	if (!encl_map_area(encl))
+		return false;
+
+	if (!encl_ioc_create_debug(encl))
 		return false;
 
 	/*
