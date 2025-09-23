@@ -156,6 +156,10 @@ int sgx_encl_eunsync(struct sgx_encl *encl, u64 paddr, u64 vaddr)
 
 	ret = __esync(virt_to_phys(pginfo));
 
+	if (ret) {
+		pr_err("sgx_encl_eunsync failed with error ret:%d", ret);
+	}
+
 	kfree(pginfo);
 	kfree(secinfo);
 

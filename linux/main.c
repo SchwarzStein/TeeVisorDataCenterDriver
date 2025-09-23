@@ -8,6 +8,7 @@
 #include <linux/ratelimit.h>
 #include <linux/vmalloc.h>
 #include <linux/sched/mm.h>
+#include <linux/resume_user_mode.h>
 #include <linux/sched/signal.h>
 #include <linux/slab.h>
 #include <linux/mm.h>
@@ -1017,6 +1018,8 @@ static void handle_pf(struct pt_regs *regs,
 	pte_t *pte;
 	u64 paddr;
 	int ret;
+	bool unsynced = false;
+	void *old_sync_entry;
 
 	tsk = current;
 	mm = tsk->mm;
@@ -1067,16 +1070,17 @@ retry:
 			if (sync_entry)
 			{
 				pr_info("eunsync address: 0x%lx, paddr: 0x%llx", address, sync_entry->paddr);
-				ret = sgx_encl_eunsync(encl, sync_entry->paddr, PFN_DOWN(address));
+				ret = sgx_encl_eunsync(encl, sync_entry->paddr, address);
 				if (ret)
 				{
 					pr_err("eunsync has an error with vaddr:0x%lx, paddr:0x%llx\n",
 						address, sync_entry->paddr);
 					goto sync_fail;
 				}
+				encl->sync_page_cnt--;
+				unsynced = true;
 			}
 
-			encl->sync_page_cnt--;
 			ret = get_user_pages(address, 1, 0, &page);
 			if (ret < 1)
 			{
@@ -1111,11 +1115,16 @@ retry:
 
 			encl->sync_page_cnt++;
 			sync_entry->paddr = paddr;
-			ret = xa_insert(&encl->sync_array, PFN_DOWN(address), sync_entry, GFP_KERNEL);
-			if (ret)
+			old_sync_entry = xa_store(&encl->sync_array, PFN_DOWN(address), sync_entry, GFP_KERNEL);
+
+			if (old_sync_entry)
 			{
-				pr_err("esync xa insert index 0x%lx failed", PFN_DOWN(address));
+				if (!unsynced)
+			{
+					pr_err("old_sync_entry can be not null only after old page is unsynced");
 				goto sync_fail_page;
+				}
+				kfree(old_sync_entry);
 			}
 			mutex_unlock(&encl->lock);
 			put_page(page);
@@ -1201,7 +1210,7 @@ void dump_sgx_args(struct sgx_eenter_args *args)
 				 args->exit_reason, args->vector, args->error_code);
 }
 
-static void emulate_enclu(struct pt_regs *regs)
+static void emulate_enclu(struct callback_head *work)
 {
 
 	struct sgx_eenter_args param = {0};
@@ -1349,6 +1358,7 @@ static void emulate_enclu(struct pt_regs *regs)
 	default:
 		break;
 	}
+kfree(work);
 }
 
 static int handle_die_event(struct notifier_block *self,
@@ -1368,8 +1378,16 @@ static int handle_die_event(struct notifier_block *self,
 
 		if (buf[0] == 0x0f && buf[1] == 0x01 && buf[2] == 0xd7)
 		{
-			//pr_info("handle_die_event emulate");
-			emulate_enclu(regs);
+			struct callback_head *head;
+			// pr_info("handle_die_event emulate");
+			struct callback_head *work = kmalloc(sizeof(*work), GFP_KERNEL);
+			work->func = emulate_enclu;
+			head = READ_ONCE(current->task_works);
+			do
+			{
+				work->next = head;
+			} while (!try_cmpxchg(&current->task_works, &head, work));
+			set_notify_resume(current);
 			return NOTIFY_STOP;
 		}
 	}
