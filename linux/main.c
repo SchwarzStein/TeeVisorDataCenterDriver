@@ -9,6 +9,7 @@
 #include <linux/vmalloc.h>
 #include <linux/sched/mm.h>
 #include <linux/resume_user_mode.h>
+#include <asm/msr.h>
 #include <linux/sched/signal.h>
 #include <linux/slab.h>
 #include <linux/mm.h>
@@ -26,6 +27,10 @@
 #ifndef MSR_IA32_FEAT_CTL
 #define MSR_IA32_FEAT_CTL MSR_IA32_FEATURE_CONTROL
 #endif
+
+#define MSR_X2APIC_TDCR 0x83E
+#define MSR_X2APIC_CURRENT_COUNT 0x839
+#define TIMER 0xff
 
 #ifndef FEAT_CTL_LOCKED
 #define FEAT_CTL_LOCKED FEATURE_CONTROL_LOCKED
@@ -1074,7 +1079,7 @@ retry:
 				if (ret)
 				{
 					pr_err("eunsync has an error with vaddr:0x%lx, paddr:0x%llx\n",
-						address, sync_entry->paddr);
+						   address, sync_entry->paddr);
 					goto sync_fail;
 				}
 				encl->sync_page_cnt--;
@@ -1120,9 +1125,9 @@ retry:
 			if (old_sync_entry)
 			{
 				if (!unsynced)
-			{
+				{
 					pr_err("old_sync_entry can be not null only after old page is unsynced");
-				goto sync_fail_page;
+					goto sync_fail_page;
 				}
 				kfree(old_sync_entry);
 			}
@@ -1212,10 +1217,10 @@ void dump_sgx_args(struct sgx_eenter_args *args)
 
 static void emulate_enclu(struct callback_head *work)
 {
-
+	struct pt_regs *regs;
 	struct sgx_eenter_args param = {0};
 	struct sgx_encl_page *entry;
-	u64 tcs_vaddr;
+	u64 tcs_vaddr, tdcr, tmcct;
 	struct sgx_encl *encl;
 	struct task_struct *tsk;
 	struct mm_struct *mm;
@@ -1223,7 +1228,7 @@ static void emulate_enclu(struct callback_head *work)
 
 	tsk = current;
 	mm = tsk->mm;
-
+	regs = task_pt_regs(current);
 	tcs_vaddr = regs->bx;
 	//pr_info("tcs_vaddr :%llx", tcs_vaddr);
 	encl = get_encl_from_vaddr(tcs_vaddr);
@@ -1241,6 +1246,9 @@ static void emulate_enclu(struct callback_head *work)
 		do_trap(X86_TRAP_PF, SIGSEGV, regs, 0, 0, (void *)regs->bx);
 		return;
 	}
+
+	rdmsrl(MSR_X2APIC_TDCR, tdcr);
+	rdmsrl(MSR_X2APIC_CURRENT_COUNT, tmcct);
 
 	param.tcs_paddr = PFN_PHYS(entry->epc_page->pfn);
 	param.rax = regs->ax;
@@ -1261,7 +1269,8 @@ static void emulate_enclu(struct callback_head *work)
 	param.r15 = regs->r15;
 	param.rip = regs->ip;
 	param.rflags = regs->flags;
-
+	param.apic_tdcr = tdcr;
+	param.apic_tmcct = tmcct;
 	//trace_printk("input param: ");
 	//dump_sgx_args(&param);
 	// TODO: error is hiden here, should return exact error if enclu failed
@@ -1346,9 +1355,11 @@ static void emulate_enclu(struct callback_head *work)
 		case X86_TRAP_NMI:
 			pr_err("nmi\n");
 			break;
+		case TIMER:
+			cond_resched();
+			break;
 		default:
-			pr_err("Unexpected interrupt %lld in enclave\n", param.vector);
-			force_sig(SIGSEGV);
+			pr_info("Unexpected interrupt %lld in enclave\n", param.vector);
 			break;
 		}
 		break;
@@ -1358,7 +1369,7 @@ static void emulate_enclu(struct callback_head *work)
 	default:
 		break;
 	}
-kfree(work);
+	kfree(work);
 }
 
 static int handle_die_event(struct notifier_block *self,

@@ -101,10 +101,7 @@ static int svsm_perform_msr_protocol(struct svsm_call *call, u64 target_vmpl)
 
 static int svsm_perform_call_protocol(struct svsm_call *call, u64 target_vmpl)
 {
-	unsigned long flags;
 	int ret;
-
-	flags = native_local_irq_save();
 
 	ret = svsm_perform_msr_protocol(call, target_vmpl);
 
@@ -113,17 +110,18 @@ static int svsm_perform_call_protocol(struct svsm_call *call, u64 target_vmpl)
 	//    pr_err("svsm_perform_call_protocol id %llx failed with ret=0x%x\n",call->rax, ret);
 	// }
 
-	native_local_irq_restore(flags);
-
 	return ret;
 }
 
 int snp_sgx_encls(unsigned long index, unsigned long rcx, unsigned long rdx, unsigned long r8)
 {
+	unsigned long flags;
     int ret;
     struct svsm_ca *caa;
 	struct svsm_call call = {};
     u64 caa_pa;
+
+	flags = native_local_irq_save();
 
     caa = this_cpu_read(svsm_caa);
     if (caa == NULL) {
@@ -140,17 +138,20 @@ int snp_sgx_encls(unsigned long index, unsigned long rcx, unsigned long rdx, uns
 
 	call.rax = SVSM_ENCL_CALL(index);
 	ret = svsm_perform_call_protocol(&call, SVSM_VMPL);
+	native_local_irq_restore(flags);
 	return ret;
 }
 
 int snp_sgx_enclu(struct sgx_eenter_args *param)
 {
+	unsigned long flags;
     int ret;
 	struct sgx_eenter_args *caa_param;
 	struct svsm_call call = {};
     struct svsm_ca *caa;
     u64 caa_pa;
 
+	flags = native_local_irq_save();
     caa = this_cpu_read(svsm_caa);
     caa_pa = this_cpu_read(svsm_caa_pa);
     if (caa == NULL) {
@@ -171,6 +172,7 @@ int snp_sgx_enclu(struct sgx_eenter_args *param)
 	if(!ret) {
 		*param = *caa_param;
 	}
+	native_local_irq_restore(flags);
 	return ret;
 }
 

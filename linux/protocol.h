@@ -77,6 +77,8 @@ struct sgx_eenter_args
     u64 exit_reason;
     u64 vector;
 	u64 error_code;
+    u64 apic_tdcr;
+    u64 apic_tmcct;
 } __attribute__((packed));
 
 struct svsm_eaddb_call {
