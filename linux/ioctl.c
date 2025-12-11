@@ -70,6 +70,8 @@ static int sgx_encl_create(struct sgx_encl *encl, struct sgx_secs *secs)
 	//struct file *backing;
 	long ret;
 
+	struct sgx_epc_page *sync_page_epc;
+	struct enclave_clone_sync_entry* sync_entry;
 	encl->page_cnt++;
 	
 	/*va_page = sgx_encl_grow(encl);
@@ -100,9 +102,16 @@ static int sgx_encl_create(struct sgx_encl *encl, struct sgx_secs *secs)
 	}
 
 	encl->secs.epc_page = secs_epc;
+
 	pginfo = kmalloc(sizeof(struct sgx_pageinfo) ,GFP_KERNEL);
+	if (!pginfo) {
+		ret = -ENOMEM;
+		goto err_out_backing;
+	}
+
 	secinfo = kmalloc(sizeof(struct sgx_secinfo) ,GFP_KERNEL);
-	if (!pginfo || !secinfo) {
+	if (!secinfo) {
+		kfree(pginfo);
 		ret = -ENOMEM;
 		goto err_out_backing;
 	}
@@ -119,10 +128,55 @@ static int sgx_encl_create(struct sgx_encl *encl, struct sgx_secs *secs)
 	kfree(secinfo);
 
 	if (ret) {
+		pr_err("ECREATE returned %ld\n", ret);
 		ret = -EIO;
-		pr_debug("ECREATE returned %ld\n", ret);
 		goto err_out;
 	}
+
+	encl->secs.encl = encl;
+	encl->base = secs->base;
+	encl->size = secs->size;
+	encl->attributes = secs->attributes;
+	//encl->attributes_mask = SGX_ATTR_DEBUG | SGX_ATTR_MODE64BIT | SGX_ATTR_KSS;
+	encl->attributes_mask = SGX_ATTR_DEBUG | SGX_ATTR_MODE64BIT | SGX_ATTR_RUNTIME | SGX_ATTR_CLONE;
+
+
+	if (secs->attributes & SGX_ATTR_CLONE) {
+		sync_entry = kmalloc(sizeof(struct enclave_clone_sync_entry), GFP_KERNEL);
+		if (!sync_entry) {
+			ret = -ENOMEM;
+			goto err_out;
+		}
+
+		sync_page_epc = sgx_alloc_epc_page(&encl->secs, true);
+		if (IS_ERR(sync_page_epc)) {
+			kfree(sync_entry);
+			pr_err("sgx_alloc_epc_page for sync page error\n");
+			ret = PTR_ERR(sync_page_epc);
+			goto err_out;
+		}
+		sync_entry->encl = encl;
+		sync_entry->sync_page_epc = sync_page_epc;
+		mutex_init(&sync_entry->lock);
+		encl->page_cnt++;
+		encl->secs_child_cnt++;
+		encl->cow_sync_page.epc_page = sync_page_epc;
+
+		// If clone attribute bit is set, register the sync page and add it to the work_list
+		ret = __ecsync(sgx_get_epc_phys_addr(secs_epc), sgx_get_epc_phys_addr(sync_page_epc));
+		if (ret) {
+			pr_err("ECSYNC returned %ld\n", ret);
+			ret = -EIO;
+			goto err_out_clone;
+		}
+
+		if (xa_insert(&clone_sync_array, secs_epc->pfn, sync_entry, GFP_KERNEL)) {
+			pr_err("sync page of the enclave has already been added!");
+			ret = -EIO;
+			goto err_out_clone;
+		}
+	}
+
 
 	if (secs->attributes & SGX_ATTR_DEBUG)
 		set_bit(SGX_ENCL_DEBUG, &encl->flags);
@@ -133,20 +187,22 @@ static int sgx_encl_create(struct sgx_encl *encl, struct sgx_secs *secs)
 		encl->runtime_size = secs->runtime_size;
 	}
 
-	encl->secs.encl = encl;
-	encl->base = secs->base;
-	encl->size = secs->size;
-	encl->attributes = secs->attributes;
-	//encl->attributes_mask = SGX_ATTR_DEBUG | SGX_ATTR_MODE64BIT | SGX_ATTR_KSS;
-	encl->attributes_mask = SGX_ATTR_DEBUG | SGX_ATTR_MODE64BIT | SGX_ATTR_RUNTIME;
 
 	/* Set only after completion, as encl->lock has not been taken. */
 	set_bit(SGX_ENCL_CREATED, &encl->flags);
 
 	return 0;
 
+err_out_clone:
+	encl->cow_sync_page.epc_page = NULL;
+	sgx_free_epc_page(sync_page_epc, sgx_get_epc_phys_addr(encl->secs.epc_page));
+	synchronize_rcu();
+	kfree(sync_entry);
+	encl->page_cnt--;
+	encl->secs_child_cnt--;
+
 err_out:
-	sgx_free_epc_page(encl->secs.epc_page);
+	sgx_free_epc_page(encl->secs.epc_page, sgx_get_epc_phys_addr(encl->secs.epc_page));
 	encl->secs.epc_page = NULL;
 
 err_out_backing:
@@ -440,7 +496,7 @@ err_out_unlock:
 #endif
 
 //err_out_free:
-	sgx_free_epc_page(epc_page);
+	sgx_free_epc_page(epc_page, sgx_get_epc_phys_addr(encl->secs.epc_page));
 	kfree(encl_page);
 
 	return ret;
@@ -464,7 +520,7 @@ static int sgx_encl_add_page_block(struct sgx_encl *encl, unsigned long src,
 	tmp_encl_page = kzalloc(sizeof(struct sgx_encl_page *) * page_num, GFP_KERNEL);
 	tmp_epc_page = kzalloc(sizeof(struct sgx_encl_page *) * page_num, GFP_KERNEL);
 	tmp_src_page = kzalloc(sizeof(struct page *) * page_num, GFP_KERNEL);
-	ec = get_eaddb_buffer_page();
+	ec = get_buffer_page();
 	if (!ec) {
 		return -EBUSY;
 	}
@@ -682,7 +738,6 @@ static long sgx_ioc_enclave_add_pages(struct sgx_encl *encl, void __user *arg)
 	} else if (!(((add_arg.dst >= encl->base) && (add_arg.dst + add_arg.length <= encl->base + encl->size))
 		|| ((add_arg.dst >= encl->runtime_base) && (add_arg.dst + add_arg.length <= encl->runtime_base + encl->runtime_size))))
 		{
-			pr_err("2");
 			return -EINVAL;
 		}
 		
@@ -1184,7 +1239,22 @@ static long sgx_enclave_modify_types(struct sgx_encl *encl,
 
 		/* Change EPC type */
 		epc_phys = sgx_get_epc_phys_addr(entry->epc_page);
-		ret = __emodt(virt_to_phys(secinfo), epc_phys);
+		ret = __emodt(virt_to_phys(secinfo), epc_phys, sgx_get_epc_phys_addr(encl->secs.epc_page));
+		// EMODT can trigger cow, thus need to handle specific cow error
+		if (ret == SGX_SYNC_PAGE_FULL || ret == SGX_NO_CACHE_PAGE) {
+			if (ret == SGX_SYNC_PAGE_FULL) {
+				try_do_sync_page(encl);
+			}
+			
+			if (ret == SGX_NO_CACHE_PAGE) {
+				add_enclave_cache_block(encl);
+			}
+
+			c -= PAGE_SIZE;
+			mutex_unlock(&encl->lock);
+			continue;
+		}
+
 		if (encls_faulted(ret)) {
 			/*
 			 * All possible faults should be avoidable:
@@ -1359,7 +1429,7 @@ static long sgx_encl_remove_pages(struct sgx_encl *encl,
 		mutex_lock(&encl->lock);
 		*/
 
-		sgx_free_epc_page(entry->epc_page);
+		sgx_free_epc_page(entry->epc_page, sgx_get_epc_phys_addr(encl->secs.epc_page));
 		encl->secs_child_cnt--;
 		entry->epc_page = NULL;
 		xa_erase(&encl->page_array, PFN_DOWN(entry->desc));
@@ -1427,9 +1497,216 @@ static long sgx_ioc_enclave_remove_pages(struct sgx_encl *encl,
 	return ret;
 }
 
+// To bind the enclave with its child, the driver uses the info passed from the user
+// to create a child enclave with hashid, parent secs, child secs and metadata page num
+// If this pass the firmware check, the creation of child enclave should not fail when
+// fork syscall succeeds.
+static long sgx_ioc_enclave_clone_bind(struct sgx_encl *encl,
+					 void __user *arg)
+{
+	struct sgx_enclave_clone_metadata params;
+	struct sgx_clone_info *clone_info;
+	struct enclave_clone_info *enclave_clone_info;
+	struct sgx_epc_page *child_secs_epc;
+	struct sgx_encl *child_encl;
+	struct sysinfo i;
+	int metadata_num = 0;
+	long ret;
+
+	if (!test_bit(SGX_ENCL_CLONE, &encl->flags) || encl->clone_info != NULL) {
+		return -EPERM;
+	}
+
+	if (copy_from_user(&params, arg, sizeof(params)))
+		return -EFAULT;
+
+	si_meminfo(&i);
+
+	if (i.freeram < params.total_page_num) {
+    	return -ENOMEM;
+	}
+
+
+	mutex_lock(&encl->lock);
+	clone_info = kzalloc(sizeof(struct sgx_clone_info), GFP_KERNEL);
+	if (!clone_info) {
+		ret = -ENOMEM;
+		goto out_unlock;
+	}
+
+	enclave_clone_info = kzalloc(sizeof(struct enclave_clone_info) + params.metadata_page_num * sizeof(struct sgx_encl_page *), GFP_KERNEL);
+	if (!enclave_clone_info) {
+		ret = -ENOMEM;
+		goto free_clone_info;
+	}
+
+	child_encl = kzalloc(sizeof(*child_encl), GFP_KERNEL);
+	if (!child_encl) {
+		ret = -ENOMEM;
+		goto free_enclave_clone_info;
+	}
+
+	kref_init(&child_encl->refcount);
+	xa_init(&child_encl->page_array);
+	xa_init(&child_encl->sync_array);
+	xa_init(&child_encl->tcs_array);
+	xa_init(&child_encl->eaug_retry_array);
+	mutex_init(&child_encl->lock);
+	INIT_LIST_HEAD(&child_encl->mm_list);
+	spin_lock_init(&child_encl->mm_lock);
+	ret = init_srcu_struct(&child_encl->srcu);
+
+	if (ret) {
+		goto free_child_enclave;
+	}
+
+	child_secs_epc = sgx_alloc_epc_page(&child_encl->secs, true);
+	//pr_info("Child secs paddr: 0x%lx", sgx_get_epc_phys_addr(child_secs_epc));
+	if (IS_ERR(child_secs_epc)) {
+		ret = PTR_ERR(child_secs_epc);
+		goto free_child_enclave;
+	}
+
+	child_encl->secs.epc_page = child_secs_epc;
+
+	for (; metadata_num < params.metadata_page_num - 1; metadata_num++) {
+		enclave_clone_info->metadata_list[metadata_num] = kzalloc(sizeof(struct sgx_encl_page), GFP_KERNEL);
+		if (!enclave_clone_info->metadata_list[metadata_num]) {
+			ret = -ENOMEM;
+			goto free_metadata_pages;
+		}
+		enclave_clone_info->metadata_list[metadata_num]->epc_page = sgx_alloc_epc_page(&child_encl->secs, true);
+		if (IS_ERR(enclave_clone_info->metadata_list[metadata_num]->epc_page)) {
+			ret = PTR_ERR(enclave_clone_info->metadata_list[metadata_num]->epc_page);
+			kfree(enclave_clone_info->metadata_list[metadata_num]);
+			goto free_metadata_pages;
+		}
+
+	}
+
+	memcpy(clone_info->hash, params.clone_hash, 32);
+	clone_info->parent_secs = sgx_get_epc_phys_addr(encl->secs.epc_page);
+	clone_info->child_secs = sgx_get_epc_phys_addr(child_secs_epc);
+	clone_info->total_page_num = params.total_page_num;
+	clone_info->metadata_page_num = params.metadata_page_num;
+
+	// Copy the fields from parent enclave
+	child_encl->runtime_base = encl->runtime_base;
+	child_encl->runtime_size = encl->runtime_size;
+	child_encl->flags  = encl->flags;
+	clear_bit(SGX_ENCL_IOCTL, &child_encl->flags);
+	child_encl->secs.encl  = child_encl;
+
+	child_encl->base = encl->base;
+	child_encl->size = encl->size;
+	child_encl->attributes = encl->attributes;
+	child_encl->attributes_mask = encl->attributes_mask;
+
+	// set clone info in the parent enclave
+	enclave_clone_info->clone_info = clone_info;
+	enclave_clone_info->child_encl = child_encl;
+	enclave_clone_info->parent = current;
+	encl->clone_info = enclave_clone_info;
+
+	mutex_unlock(&encl->lock);
+	
+
+	return 0;
+
+free_metadata_pages:
+	for (int j = metadata_num - 1; j >= 0; j--) {
+		sgx_free_epc_page(enclave_clone_info->metadata_list[j]->epc_page,
+			sgx_get_epc_phys_addr(child_encl->secs.epc_page));
+		kfree(enclave_clone_info->metadata_list[j]);
+		enclave_clone_info->metadata_list[j] = NULL;
+	}
+	sgx_free_epc_page(child_encl->secs.epc_page, 
+		sgx_get_epc_phys_addr(child_encl->secs.epc_page));
+free_child_enclave:
+	kfree(child_encl);
+free_enclave_clone_info:
+	kfree(enclave_clone_info);
+free_clone_info:
+	kfree(clone_info);
+out_unlock:
+	mutex_unlock(&encl->lock);
+
+	return ret;
+}
+
+long sgx_enclave_clone_abort(struct sgx_encl *encl)
+{
+	long ret;
+
+
+	if (!test_bit(SGX_ENCL_CLONE, &encl->flags)) {
+		return -EPERM;
+	}
+
+	mutex_lock(&encl->lock);
+	pr_info("sgx_enclave_clone_abort ECABORT");
+	ret =  __ecabort(sgx_get_epc_phys_addr(encl->secs.epc_page));
+
+	if (ret) {
+		pr_err("ECABORT failed with ret 0x%lx", ret);
+		ret = -EINVAL;
+		goto out_unlock;
+	}
+
+	if (encl->clone_info) {
+		pr_info("Release child enclave\n");
+		struct sgx_encl *child_encl = encl->clone_info->child_encl;
+		// Clear the bit to not abort the clone again here.
+		clear_bit(SGX_ENCL_CLONE, &child_encl->flags);
+
+		// secs epc page is released in sgx_encl_release,
+		// but metadata pages should be released manually
+		pr_info("Start free metadata_page\n");
+		for (int i = 0; i < encl->clone_info->clone_info->metadata_page_num - 1; i++) {
+			sgx_free_epc_page(encl->clone_info->metadata_list[i]->epc_page,
+				sgx_get_epc_phys_addr(child_encl->secs.epc_page));
+			kfree(encl->clone_info->metadata_list[i]);
+			encl->clone_info->metadata_list[i] = NULL;
+		}
+		pr_info("Try to free child enclave instance\n");
+		if (!kref_put(&child_encl->refcount, sgx_encl_release)) {
+			pr_err("child enclave instance cannot be released!\n");
+		}
+		kfree(encl->clone_info->clone_info);
+		kfree(encl->clone_info);
+	}
+
+	encl->clone_info = NULL;
+	clear_bit(SGX_ENCL_CLONE, &encl->flags);
+	mutex_unlock(&encl->lock);
+
+	return 0;
+
+out_unlock:
+	mutex_unlock(&encl->lock);
+
+	return ret;
+}
+
+static long sgx_ioc_enclave_clone_abort(struct sgx_encl *encl)
+{
+	return sgx_enclave_clone_abort(encl);
+}
+
+static long sgx_ioc_enclave_clone_result(struct sgx_encl *encl)
+{
+	return test_bit(SGX_ENCL_CLONE_FAIL, &encl->flags);
+}
+
 long sgx_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
 {
-	struct sgx_encl *encl = filep->private_data;
+	struct sgx_encl *encl;
+	encl = xa_load(filep->private_data, (unsigned long)current->mm);
+	if (!encl) {
+		pr_err("Cannot load enclave instance!");
+		return -ENODEV;
+	}
+
 	int ret;
 
 	if (test_and_set_bit(SGX_ENCL_IOCTL, &encl->flags))
@@ -1457,6 +1734,15 @@ long sgx_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
 		break;
 	case SGX_IOC_ENCLAVE_REMOVE_PAGES:
 		ret = sgx_ioc_enclave_remove_pages(encl, (void __user *)arg);
+		break;
+    case SGX_IOC_ENCLAVE_CLONE_BIND:
+		ret = sgx_ioc_enclave_clone_bind(encl, (void __user *)arg);
+		break;
+	case SGX_IOC_ENCLAVE_CLONE_ABORT:
+		ret = sgx_ioc_enclave_clone_abort(encl);
+		break;
+	case SGX_IOC_ENCLAVE_CLONE_RESULT:
+		ret = sgx_ioc_enclave_clone_result(encl);
 		break;
 	default:
 		ret = -ENOIOCTLCMD;

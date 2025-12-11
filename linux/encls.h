@@ -197,6 +197,46 @@ static inline int __esync(u64 pginfo)
 {
 	return snp_sgx_encls(SVSM_ENCL_ESYNC, pginfo, 0, 0);
 }
+
+static inline int __ecsync(u64 secs, u64 sync_page)
+{
+	return snp_sgx_encls(SVSM_ENCL_ECSYNC, secs, sync_page, 0);
+}
+
+static inline int __ecaddcache(u64 secs, u64 start_paddr, u64 page_num)
+{
+	return snp_sgx_encls(SVSM_ENCL_EADDCOWCACHE, secs, start_paddr, page_num);
+}
+
+static inline int __ecclearcache(u64 secs)
+{
+	return snp_sgx_encls(SVSM_ENCL_ECLEARCOWCACHE, secs, 0, 0);
+}
+
+static inline int __eccreate(u64 create_info_addr)
+{
+	return snp_sgx_encls(SVSM_ENCL_ECCREATE, create_info_addr, 0, 0);
+}
+
+static inline int __ecloneinfo(u64 cloneinfo_page_paddr, u64 child_secs_paddr)
+{
+	return snp_sgx_encls(SVSM_ENCL_ECLONEINFO, cloneinfo_page_paddr, child_secs_paddr, 0);
+}
+
+static inline int __ecabort(u64 parent_secs_paddr)
+{
+	return snp_sgx_encls(SVSM_ENCL_ECABORT, parent_secs_paddr, 0, 0);
+}
+
+static inline int __ecadd(u64 cloneinfo_page_paddr, u64 child_secs_paddr)
+{
+	return snp_sgx_encls(SVSM_ENCL_ECADD, cloneinfo_page_paddr, child_secs_paddr, 0);
+}
+
+static inline int __ecinit(u64 init_info_addr)
+{
+	return snp_sgx_encls(SVSM_ENCL_ECINIT, init_info_addr, 0, 0);
+}
 /*
 static inline int __ecreate(struct sgx_pageinfo *pginfo, void *secs)
 {
@@ -256,10 +296,10 @@ static inline int __einit(u64 sigstruct, u64 token, u64 secs)
 	return snp_sgx_encls(SVSM_ENCL_EINIT, sigstruct, secs, token);
 }
 
-static inline int __eremove(u64 addr)
+static inline int __eremove(u64 addr, u64 secs)
 {
 	//pr_info("eremove addr 0x%llx\n", addr);
-	return snp_sgx_encls(SVSM_ENCL_EREMOVE, addr, 0, 0);
+	return snp_sgx_encls(SVSM_ENCL_EREMOVE, addr, secs, 0);
 }
 
 /*
@@ -331,9 +371,9 @@ static inline int __emodpr(u64 secinfo, u64 addr)
 }
 
 /* Change the type of an EPC page. */
-static inline int __emodt(u64 secinfo, u64 addr)
+static inline int __emodt(u64 secinfo, u64 addr, u64 secs)
 {
-	return snp_sgx_encls(SVSM_ENCL_EMODT, secinfo, addr, 0);
+	return snp_sgx_encls(SVSM_ENCL_EMODT, secinfo, addr, secs);
 }
 
 #endif /* _X86_ENCLS_H */

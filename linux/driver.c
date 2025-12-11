@@ -25,17 +25,28 @@ u32 sgx_misc_reserved_mask;
 static int sgx_open(struct inode *inode, struct file *file)
 {
 	struct sgx_encl *encl;
+	struct xarray *enclave_array;
 	int ret;
 
-	encl = kzalloc(sizeof(*encl), GFP_KERNEL);
-	if (!encl)
+	enclave_array = kzalloc(sizeof(struct xarray), GFP_KERNEL);
+	if (!enclave_array) {
 		return -ENOMEM;
+	}
+
+	xa_init(enclave_array);
+	encl = kzalloc(sizeof(*encl), GFP_KERNEL);
+	if (!encl) {
+		ret = -ENOMEM;
+		goto free_enclave_array;
+	}
+		
 
 	kref_init(&encl->refcount);
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0))
 	xa_init(&encl->page_array);
 	xa_init(&encl->sync_array);
 	xa_init(&encl->tcs_array);
+	xa_init(&encl->eaug_retry_array);
 #else
 	INIT_RADIX_TREE(&encl->page_tree, GFP_KERNEL);
 #endif
@@ -45,58 +56,70 @@ static int sgx_open(struct inode *inode, struct file *file)
 	spin_lock_init(&encl->mm_lock);
 
 	ret = init_srcu_struct(&encl->srcu);
-	if (ret) {
-		kfree(encl);
-		return ret;
-	}
+	if (ret) 
+		goto free_encl;
 
-	file->private_data = encl;
+	ret = xa_insert(enclave_array, (unsigned long)current->mm, encl, GFP_KERNEL);
+	if (ret) 
+		goto free_encl;
+
+	file->private_data = enclave_array;
 	pr_info("sgx_open finished\n");
 	return 0;
+
+
+free_encl:
+	kfree(encl);
+free_enclave_array:
+	kfree(enclave_array);
+	return ret;
 }
 
 static int sgx_release(struct inode *inode, struct file *file)
 {
-	struct sgx_encl *encl = file->private_data;
-	struct sgx_encl_mm *encl_mm;
-
-	/*
-	 * Drain the remaining mm_list entries. At this point the list contains
-	 * entries for processes, which have closed the enclave file but have
-	 * not exited yet. The processes, which have exited, are gone from the
-	 * list by sgx_mmu_notifier_release().
-	 */
-	for ( ; ; )  {
-		spin_lock(&encl->mm_lock);
-
-		if (list_empty(&encl->mm_list)) {
-			encl_mm = NULL;
-		} else {
-			encl_mm = list_first_entry(&encl->mm_list,
-						   struct sgx_encl_mm, list);
-			list_del_rcu(&encl_mm->list);
+	struct sgx_encl *encl;
+	unsigned long index, size_pages;
+	struct enclave_cache_block_entry *block_entry;
+	
+	rcu_read_lock();
+	if (xa_empty(file->private_data)) {
+		kfree(file->private_data);
+	} else {
+		xa_for_each(file->private_data, index, encl) {
+			if (kref_put(&encl->refcount, sgx_encl_release)) {
+			} else
+			{
+				pr_err("enclave with mm 0x%lx not released before fd released!", index);
+				pr_err("encl array leaked\n");
+			}
+			
 		}
-
-		spin_unlock(&encl->mm_lock);
-
-		/* The enclave is no longer mapped by any mm. */
-		if (!encl_mm)
-			break;
-
-		synchronize_srcu(&encl->srcu);
-		mmu_notifier_unregister(&encl_mm->mmu_notifier, encl_mm->mm);
-		kfree(encl_mm);
 	}
 
-	kref_put(&encl->refcount, sgx_encl_release);
+	xa_for_each(&cache_block_array, index, block_entry) {
+		if (!atomic_long_read_acquire(&block_entry->counter) && atomic_long_read_acquire(&block_entry->consumed)) {
+			//pr_info("Release free block\n");
+			size_pages = (block_entry->end - block_entry->start + PAGE_SIZE) >> PAGE_SHIFT;
+			free_pages((unsigned long)phys_to_virt(block_entry->start), fls(size_pages) - 1);
+			kfree(block_entry);
+			xa_erase(&cache_block_array, index);
+		}
+	}
+	rcu_read_unlock();
 	pr_info("device closed\n");
 	return 0;
 }
 
 static int sgx_mmap(struct file *file, struct vm_area_struct *vma)
 {
-	struct sgx_encl *encl = file->private_data;
+	struct sgx_encl *encl;
 	int ret;
+	encl = xa_load(file->private_data, (unsigned long)vma->vm_mm);
+
+	if (!encl) {
+		pr_err("Cannot load enclave instance, do not create an enclave in a forked thread with parent device fd, please reopen the device!\n");
+		return -ENODEV;
+	}
 
 	ret = sgx_encl_may_map(encl, vma->vm_start, vma->vm_end, vma->vm_flags);
 	if (ret)
@@ -108,8 +131,12 @@ static int sgx_mmap(struct file *file, struct vm_area_struct *vma)
 
 	vma->vm_ops = &sgx_vm_ops;
 	vm_flags_set(vma, VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP | VM_IO);
-	vma->vm_private_data = encl;
+	vma->vm_private_data = file->private_data;
 
+	// The first mmap should not increment the counter
+	if (test_and_set_bit(SGX_ECNL_MMAP, &encl->flags)) {
+		kref_get(&encl->refcount);
+	}
 	return 0;
 }
 
@@ -208,7 +235,7 @@ int __init sgx_drv_init(void)
 
 	int ret = misc_register(&sgx_dev_enclave);
 	if (ret) {
-		pr_err("Creating /dev/teevisor_enclave failed with %d.\n", ret);
+		pr_err("Creating /dev/sgx_enclave failed with %d.\n", ret);
 		return ret;
 	}
 

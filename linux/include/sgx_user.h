@@ -35,6 +35,12 @@ enum sgx_page_flags {
 	_IOWR(SGX_MAGIC, 0x06, struct sgx_enclave_modify_types)
 #define SGX_IOC_ENCLAVE_REMOVE_PAGES \
 	_IOWR(SGX_MAGIC, 0x07, struct sgx_enclave_remove_pages)
+#define SGX_IOC_ENCLAVE_CLONE_BIND \
+	_IOW(SGX_MAGIC, 0x08, struct sgx_enclave_clone_metadata)
+#define SGX_IOC_ENCLAVE_CLONE_ABORT \
+	_IO(SGX_MAGIC, 0x09)
+#define SGX_IOC_ENCLAVE_CLONE_RESULT \
+	_IO(SGX_MAGIC, 0x0a)
 
 /**
  * struct sgx_enclave_create - parameter structure for the
@@ -137,6 +143,14 @@ struct sgx_enclave_remove_pages {
 	__u64 length;
 	__u64 count;
 };
+
+
+struct sgx_enclave_clone_metadata {
+    __u8  clone_hash[32];
+    __u64 total_page_num;
+    __u64 metadata_page_num;
+};
+
 
 struct sgx_enclave_run;
 

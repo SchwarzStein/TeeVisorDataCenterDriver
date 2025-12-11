@@ -12,6 +12,7 @@
 #include "encls.h"
 #include "sgx.h"
 #include "dcap.h"
+#include "driver.h"
 #include <linux/version.h>
 
 
@@ -102,7 +103,7 @@ int sgx_encl_esync(struct sgx_encl *encl, u64 paddr, u64 vaddr, bool read, bool 
 	struct sgx_secinfo *secinfo;
 	int ret;
 
-	pginfo = kmalloc(sizeof(struct sgx_pageinfo) ,GFP_KERNEL);
+	pginfo = kmalloc(sizeof(struct sgx_pageinfo), GFP_KERNEL);
 	secinfo = kzalloc(sizeof(struct sgx_secinfo), GFP_KERNEL);
 
 	if (!pginfo || !secinfo) {
@@ -153,8 +154,14 @@ int sgx_encl_eunsync(struct sgx_encl *encl, u64 paddr, u64 vaddr)
 	pginfo->addr = vaddr;
 	pginfo->metadata = virt_to_phys(secinfo);
 	pginfo->contents = paddr;
-
+retry:
 	ret = __esync(virt_to_phys(pginfo));
+
+	// Cloned enclave share one epcm with parent, in epcm contention cases, retry
+	if(ret == (ENCLS_FAULT_FLAG | X86_TRAP_GP) && encl->attributes & SGX_ATTR_CLONE) {
+		pr_info("sgx_encl_eunsync EPCM lock contention, retry\n");
+		goto retry;
+	}
 
 	if (ret) {
 		pr_err("sgx_encl_eunsync failed with error ret:%d", ret);
@@ -319,8 +326,14 @@ static vm_fault_t sgx_encl_eaug_page(struct vm_area_struct *vma,
 	pginfo->metadata = 0;
 
 	ret = __eaug(virt_to_phys(pginfo), sgx_get_epc_phys_addr(epc_page));
-	if (ret)
+	if (ret == SGX_ENCLAVE_CLONING) {
+		ret = xa_insert(&encl->eaug_retry_array, PFN_DOWN(addr), encl_page, GFP_KERNEL);
+		if (ret) {
+			goto err_out;
+		}
+	} else if (ret) {
 		goto err_out;
+	}
 
 	encl_page->encl = encl;
 	encl_page->epc_page = epc_page;
@@ -353,7 +366,7 @@ err_out:
 err_out_shrink:
 	//sgx_encl_shrink(encl, va_page);
 //err_out_epc:
-	sgx_free_epc_page(epc_page);
+	sgx_free_epc_page(epc_page, sgx_get_epc_phys_addr(encl->secs.epc_page));
 err_out_unlock:
 	mutex_unlock(&encl->lock);
 	kfree(encl_page);
@@ -381,6 +394,7 @@ static int sgx_vma_fault(struct vm_fault *vmf)
 	struct vm_area_struct *vma = vmf->vma;
 	//struct sgx_encl_page *entry;
 	//unsigned long phys_addr;
+	struct xarray *enclave_array = vma->vm_private_data;
 	struct sgx_encl *encl;
 	//pte_t *pte;
 	//spinlock_t *ptl;
@@ -390,7 +404,9 @@ static int sgx_vma_fault(struct vm_fault *vmf)
 	int ret = VM_FAULT_NOPAGE;
 #endif
 
-	encl = vma->vm_private_data;
+	if (unlikely(!enclave_array))
+		return VM_FAULT_SIGBUS;
+	encl = xa_load(enclave_array, (unsigned long)vma->vm_mm);
 
 	/*
 	 * It's very unlikely but possible that allocating memory for the
@@ -468,20 +484,406 @@ out:
 	return ret;
 }
 
-static void sgx_vma_open(struct vm_area_struct *vma)
+static void sgx_vma_close(struct vm_area_struct* vma)
 {
-	struct sgx_encl *encl = vma->vm_private_data;
+	struct xarray *enclave_array = vma->vm_private_data;
+	struct sgx_encl *encl;
 
-	/*
-	 * It's possible but unlikely that vm_private_data is NULL. This can
-	 * happen in a grandchild of a process, when sgx_encl_mm_add() had
-	 * failed to allocate memory in this callback.
-	 */
-	if (unlikely(!encl))
+	if (unlikely(!enclave_array))
 		return;
 
-	if (sgx_encl_mm_add(encl, vma->vm_mm))
-		vma->vm_private_data = NULL;
+	//pr_info("vma_close\n");
+	encl = xa_load(vma->vm_private_data, (unsigned long)vma->vm_mm);
+	
+	if (!encl) {
+		return;
+	}
+	
+	//pr_info("before decrement refcount=%d\n", kref_read(&encl->refcount));
+	if (kref_put(&encl->refcount, sgx_encl_release)) {
+		xa_erase(vma->vm_private_data, (unsigned long)vma->vm_mm); 
+	}
+	return;
+}
+
+static struct sgx_encl *clone_enclave(struct sgx_encl *parent_encl)
+{
+	struct svsm_ecloneinfo_call *ec;
+	struct svsm_ecaddinfo_call *ea;
+	struct sgx_encl *child_encl;
+	struct sgx_encl_page *entry, *encl_page, *child_encl_page;
+	struct sgx_encl_sync_page *sync_entry, *child_sync_entry;
+	unsigned long index;
+	int ret;
+	bool loop = false;
+	u64 added_page_num = 0;
+	u16 num_entries;
+
+	child_encl = parent_encl->clone_info->child_encl;
+	mutex_lock(&parent_encl->lock);
+	mutex_lock(&child_encl->lock);
+
+	//pr_info("ECCREATE child secs paddr: 0x%llx\n", parent_encl->clone_info->clone_info->child_secs);
+	ret = __eccreate(virt_to_phys(parent_encl->clone_info->clone_info));
+	if (ret) {
+		pr_err("ECCREATE failed with ret 0x%x", ret);
+		ret = -EINVAL;
+		goto clone_abort;
+	}
+
+	ec = get_buffer_page();
+	if (!ec) {
+		goto clone_abort;
+	}
+
+	ea = (struct svsm_ecaddinfo_call *)ec;
+	// First copy the page array and sync array from the parent enclave
+	xa_for_each(&parent_encl->page_array, index, entry) {
+		if (entry->epc_page && entry->type != SGX_PAGE_TYPE_TCS) {
+			child_encl_page = kzalloc(sizeof(struct sgx_encl_page), GFP_KERNEL);
+			if (!child_encl_page) {
+				goto clone_abort;
+			}
+
+			child_encl_page->desc = entry->desc;
+			child_encl_page->epc_page = entry->epc_page;
+			child_encl_page->encl = child_encl;
+			child_encl_page->vm_max_prot_bits = entry->vm_max_prot_bits;
+			child_encl_page->type = entry->type;
+			ret = xa_insert(&child_encl->page_array, PFN_DOWN(child_encl_page->desc), child_encl_page, GFP_KERNEL);
+			if (ret) {
+				kfree(child_encl_page);
+				goto clone_abort;
+			}
+			atomic_long_inc_return_release(&entry->epc_page->counter);
+		}
+	}
+
+	xa_for_each(&parent_encl->sync_array, index, sync_entry) {
+		child_sync_entry =  kzalloc(sizeof(struct sgx_encl_sync_page), GFP_KERNEL);
+		if (!child_sync_entry) {
+			goto clone_abort;
+		}
+		child_sync_entry->paddr = sync_entry->paddr;
+		ret = xa_insert(&child_encl->sync_array, index, child_sync_entry, GFP_KERNEL);
+		if (ret) {
+			kfree(child_sync_entry);
+			goto clone_abort;
+		}
+	}
+
+	for (u16 i = 0; i < CLONE_PT_MAX; i++) {
+		do {
+			loop = false;
+
+			// First get unadded metadata page details from svsm
+			ec->num_entries = ECLONEINFO_MAX_ENTRY_NUM;
+			ec->metadata_type = i;
+			ret = __ecloneinfo(virt_to_phys(ec), sgx_get_epc_phys_addr(child_encl->secs.epc_page));
+			if (ret) {
+				pr_err("Failed to fetch pages details when doing eclone in fork with ret %d!", ret);
+				goto clone_abort;
+			}
+
+			// num_entries has been updated by the firmware, if unchanged, then refetch again after adding
+			if (ec->num_entries == ECLONEINFO_MAX_ENTRY_NUM) {
+				loop = true;
+			}
+
+			if (added_page_num + ec->num_entries > parent_encl->clone_info->clone_info->metadata_page_num - 1) {
+				pr_err("Invalid num_entries, exceed defined number!\n");
+				ret = -EFAULT;
+				goto clone_abort;
+			}
+
+			num_entries = ec->num_entries;
+			//pr_info("ECADD type: %d", ec->metadata_type);
+			for (u16 j = 0; j < num_entries; j++) {
+
+				encl_page = parent_encl->clone_info->metadata_list[added_page_num + j];
+				// Check if vaddr and paddr match in the parent enclave
+				if (i == CLONE_PT_TCS) {
+					entry = xa_load(&parent_encl->tcs_array, PFN_DOWN(ec->cloneinfo[j].vaddr));
+					encl_page->type = SGX_PAGE_TYPE_TCS;
+				} else {
+					entry = xa_load(&parent_encl->page_array, PFN_DOWN(ec->cloneinfo[j].vaddr));
+					encl_page->type = SGX_PAGE_TYPE_REG;
+				}
+				
+				if (!entry) {
+					pr_err("Invalid vaddr: 0x%llx in fetched cloneinfo", ec->cloneinfo[j].vaddr);
+					ret = -EFAULT;
+					goto clone_abort;
+				}
+
+				// if (PFN_PHYS(entry->epc_page->pfn) != ec->cloneinfo[j].paddr) {
+				// 	pr_err("Invalid paddr: 0x%llx in fetched cloneinfo", ec->cloneinfo[j].paddr);
+				// 	ret = -EFAULT;
+				// 	goto clone_abort;
+				// }
+
+				encl_page->desc = ec->cloneinfo[j].vaddr;
+				encl_page->encl = child_encl;
+				encl_page->vm_max_prot_bits = VM_READ | VM_WRITE;
+
+				// update the paddr for adding pages
+				ec->cloneinfo[j].paddr = PFN_PHYS(parent_encl->clone_info->metadata_list[added_page_num + j]->epc_page->pfn);
+				//pr_info("vaddr: %llx, paddr: %llx", ec->cloneinfo[j].vaddr, ec->cloneinfo[j].paddr);
+			}
+
+			ea->next = 0;
+			added_page_num += ec->num_entries;
+
+			//pr_info("ECADD\n");
+			ret = __ecadd(virt_to_phys(ea), sgx_get_epc_phys_addr(child_encl->secs.epc_page));
+			if (ret) {
+				pr_err("Failed to add metadata page for cloned enclave with ret %d!", ret);
+				goto clone_abort;
+			}
+
+			// First add epc page to tcs array
+			if (!loop && i == CLONE_PT_TCS) {
+				for (u16 tcs_index = 0; tcs_index < added_page_num; tcs_index++) {
+					encl_page = parent_encl->clone_info->metadata_list[tcs_index];
+					ret = xa_insert(&child_encl->tcs_array, PFN_DOWN(encl_page->desc), encl_page, GFP_KERNEL);
+					if (ret) {
+						pr_err("xa_insert tcs_array failed in eclone!\n");
+						goto clone_abort;
+					}
+				}
+			}
+		} while (loop);
+	}
+	
+	// If added_page_num does not match the number defined in eccreate, secs page is excluded
+	if (added_page_num != parent_encl->clone_info->clone_info->metadata_page_num - 1) {
+		pr_err("metadata page number does not match!\n");
+		goto clone_abort;
+	}
+
+	// Add all the pages to page_list of child enclave
+	for (u64 i = 0; i < added_page_num; i++) {
+		encl_page = parent_encl->clone_info->metadata_list[i];
+		entry = xa_store(&child_encl->page_array, PFN_DOWN(encl_page->desc), encl_page, GFP_KERNEL);
+		if (xa_is_err(entry)) {
+			pr_err("xa_store page_array failed in eclone!");
+			goto clone_abort;
+		}
+
+		// Metadata Pages are already copied from its parent, decrement the previous counter
+		if (entry) {
+			atomic_long_dec_return_release(&entry->epc_page->counter);
+			kfree(entry);
+		}
+	}
+
+	//pr_info("ECINIT\n");
+	// Finish the clone after adding all the metadata pages
+	ret = __ecinit(virt_to_phys(parent_encl->clone_info->clone_info));
+	if (ret) {
+		pr_err("Failed to initialize the cloned enclave with ret %x!", ret);
+		goto clone_abort;
+	}
+
+	kfree(parent_encl->clone_info->clone_info);
+	clear_bit(SGX_ENCL_CLONE, &child_encl->flags);
+	clear_bit(SGX_ENCL_CLONE, &parent_encl->flags);
+	//pr_info("parent_encl encl flag: %lx",parent_encl->flags);
+	//pr_info("child_encl encl flag: %lx",child_encl->flags);
+	// cache sync page is not shared and will be added later
+	child_encl->page_cnt = parent_encl->page_cnt - 1;
+	child_encl->secs_child_cnt = parent_encl->secs_child_cnt - 1;
+	child_encl->sync_page_cnt = parent_encl->sync_page_cnt;
+
+	// If any eaug happened between eclone and ecinit, retry here
+	if (!xa_empty(&parent_encl->eaug_retry_array)) {
+		struct sgx_pageinfo *pginfo;
+		pginfo = kzalloc(sizeof(struct sgx_pageinfo) ,GFP_KERNEL);
+		if (!pginfo) {
+			force_sig(SIGBUS);
+			goto end_elcone;
+		}
+		xa_for_each(&parent_encl->eaug_retry_array, index, entry) {
+			pginfo->secs = (unsigned long)sgx_get_epc_phys_addr(parent_encl->secs.epc_page);
+			pginfo->addr = entry->desc & PAGE_MASK;
+			pginfo->metadata = 0;
+			ret = __eaug(virt_to_phys(pginfo), sgx_get_epc_phys_addr(entry->epc_page));
+			if (ret) {
+				xa_erase(&parent_encl->page_array, PFN_DOWN(entry->desc));
+				sgx_free_epc_page(entry->epc_page, sgx_get_epc_phys_addr(parent_encl->secs.epc_page));
+				kfree(entry);
+				force_sig(SIGBUS);
+			}
+		}
+		xa_destroy(&parent_encl->page_array);
+		kfree(pginfo);
+	}
+	
+end_elcone:
+	kfree(parent_encl->clone_info);
+	parent_encl->clone_info = NULL;
+	mutex_unlock(&child_encl->lock);
+	mutex_unlock(&parent_encl->lock);
+	preempt_enable();
+	return child_encl;
+
+clone_abort:
+	xa_for_each(&child_encl->sync_array, index, sync_entry) {
+		kfree(sync_entry);
+	}
+
+	long epc_page_counter;
+
+	// Free the encl_page struct if the page is not a new page(metadata page)
+	// These encl_page will be freed in sgx_enclave_clone_abort;
+	xa_for_each(&child_encl->page_array, index, entry) {
+		epc_page_counter = atomic_long_dec_return_release(&entry->epc_page->counter);
+
+		// For metadata pages, memory released in sgx_enclave_clone_abort.
+		// Revert the decrement of the counter to make colleciton correct.
+		if (epc_page_counter == 0) {
+			atomic_long_inc_return_release(&entry->epc_page->counter);
+		} else {
+			kfree(entry);
+		}
+	}
+
+	xa_destroy(&child_encl->page_array);
+	xa_destroy(&child_encl->sync_array);
+	mutex_unlock(&child_encl->lock);
+	mutex_unlock(&parent_encl->lock);
+	sgx_enclave_clone_abort(parent_encl);
+	pr_info("sgx_enclave_clone_abort finished");
+	
+	return NULL;
+}
+
+// Open can be trigger 1) after mmap 2) might after mprotect 3) after fork
+// Use vma_open and vma_close to manage the enclave lifecycle
+// Increment the counter unless this is the first vma_open after mmap
+// Decrement the counter in vma_close
+static void sgx_vma_open(struct vm_area_struct *vma)
+{
+	struct sgx_encl *encl, *parent_encl;
+	struct xarray *enclave_array = vma->vm_private_data;
+	struct enclave_clone_sync_entry* sync_entry;
+	struct sgx_epc_page *sync_page_epc;
+	bool clone = false;
+	int ret;
+
+	//pr_info("vma_open\n");
+	if (unlikely(!enclave_array))
+		return;
+
+	encl = xa_load(enclave_array, (unsigned long)vma->vm_mm);
+
+	// If cannot search enclave but has a parent enclave
+	// In child thread, if there is not an ongoing fork, vma->vm_private_data
+	// will be set to NULL, later 
+	if (!encl) {
+		parent_encl = xa_load(enclave_array, (unsigned long)current->mm);
+		if (parent_encl) {
+			pr_info("parent_encl existed\n");
+		} else {
+			pr_info("Cannot find parent enclave\n");
+		}
+		if (parent_encl && parent_encl->clone_info) {
+			clone = true;
+			pr_info("start clone!\n");
+			
+			// do eclone if child is binded
+			encl = clone_enclave(parent_encl);
+			// Register the sync page after child is cloned
+			if (encl) {
+				//insert it into the enclave list
+				pr_info("clone parent mm: 0x%lx, child mm: 0x%lx\n",(unsigned long)current->mm, (unsigned long)vma->vm_mm);
+				ret = xa_insert(enclave_array, (unsigned long)vma->vm_mm,encl, GFP_KERNEL);
+				if (ret) {
+					goto encl_failed_after_clone;
+				}
+
+				sync_entry = kmalloc(sizeof(struct enclave_clone_sync_entry), GFP_KERNEL);
+				if (!sync_entry) {
+					goto encl_failed_after_insert;
+				}
+
+				sync_page_epc = sgx_alloc_epc_page(&encl->secs, true);
+				if (IS_ERR(sync_page_epc)) {
+					kfree(sync_entry);
+					pr_err("sgx_alloc_epc_page for sync page of child enclave error\n");
+					goto encl_failed_after_insert;
+				}
+				sync_entry->encl = encl;
+				sync_entry->sync_page_epc = sync_page_epc;
+				mutex_init(&sync_entry->lock);
+				encl->page_cnt++;
+				encl->secs_child_cnt++;
+				encl->cow_sync_page.epc_page = sync_page_epc;
+
+				// If clone attribute bit is set, register the sync page and add it to the work_list
+				ret = __ecsync(sgx_get_epc_phys_addr(encl->secs.epc_page), sgx_get_epc_phys_addr(sync_page_epc));
+				if (ret) {
+					pr_err("ECSYNC returned %d\n", ret);
+					ret = -EIO;
+					goto err_ecsync;
+				}
+
+				if (xa_insert(&clone_sync_array, encl->secs.epc_page->pfn, sync_entry, GFP_KERNEL)) {
+					pr_err("sync page of the enclave has already been added!");
+					ret = -EIO;
+					goto err_ecsync;
+				}
+				clear_bit(SGX_ENCL_CLONE_FAIL, &parent_encl->flags);
+				clear_bit(SGX_ENCL_CLONE_FAIL, &encl->flags);
+			} else {
+				pr_err("clone_enclave failed\n");
+				goto encl_open_failed;
+			}
+		} else {
+			// If the function is tirggered not by fork after eclone, just return;
+			goto encl_open_failed;
+		}
+	}
+
+	// If register the encl failed, release the encl here, it will not released in sgx_vma_close
+	if (sgx_encl_mm_add(encl, vma->vm_mm)) {
+		if (kref_put(&encl->refcount, sgx_encl_release)) {
+			xa_erase(enclave_array, (unsigned long)vma->vm_mm);
+		} else {
+			pr_err("sgx_encl_mm_add failed when encl->refcount > 1!\n");
+		}
+		goto encl_open_failed;
+	}
+		
+		
+
+	// To keep the refcount correctly, do not increment the counter first time after clone
+	// counter is initialized set to one during clone
+	if (test_and_set_bit(SGX_ECNL_MMAP, &encl->flags)) {
+		kref_get(&encl->refcount);
+	}
+
+	//pr_info("vma_open refcount=%d\n", kref_read(&encl->refcount));
+
+	return;
+err_ecsync:
+	encl->cow_sync_page.epc_page = NULL;
+	sgx_free_epc_page(sync_page_epc, sgx_get_epc_phys_addr(encl->secs.epc_page));
+	synchronize_rcu();
+	kfree(sync_entry);
+	encl->page_cnt--;
+	encl->secs_child_cnt--;
+encl_failed_after_insert:
+	xa_erase(enclave_array, (unsigned long)vma->vm_mm);
+encl_failed_after_clone:
+	kref_put(&encl->refcount, sgx_encl_release);
+encl_open_failed:
+	if (clone) {
+		set_bit(SGX_ENCL_CLONE_FAIL, &parent_encl->flags);
+	}
+	vma->vm_private_data = NULL;
+	pr_info("vma_open clone failed end\n");
+	return;
 }
 
 
@@ -567,7 +969,14 @@ int sgx_encl_may_map(struct sgx_encl *encl, unsigned long start,
 static int sgx_vma_mprotect(struct vm_area_struct *vma, unsigned long start,
 			    unsigned long end, unsigned long newflags)
 {
-	return sgx_encl_may_map(vma->vm_private_data, start, end, newflags);
+	struct xarray *enclave_array = vma->vm_private_data;
+	struct sgx_encl *encl;
+	if (!enclave_array) {
+		return -EFAULT;
+	}
+	
+	encl = xa_load(enclave_array, (unsigned long)vma->vm_mm);
+	return sgx_encl_may_map(encl, start, end, newflags);
 }
 
 static int sgx_encl_debug_read(struct sgx_encl *encl, struct sgx_encl_page *page,
@@ -625,7 +1034,8 @@ static struct sgx_encl_page *sgx_encl_reserve_page(struct sgx_encl *encl,
 static int sgx_vma_access(struct vm_area_struct *vma, unsigned long addr,
 			  void *buf, int len, int write)
 {
-	struct sgx_encl *encl = vma->vm_private_data;
+	struct xarray *enclave_array = vma->vm_private_data;
+	struct sgx_encl *encl;
 	struct sgx_encl_page *entry = NULL;
 	char *data;
 	unsigned long align;
@@ -634,12 +1044,17 @@ static int sgx_vma_access(struct vm_area_struct *vma, unsigned long addr,
 	int ret = 0;
 	int i;
 
-	data = kzalloc(sizeof(unsigned long) ,GFP_KERNEL);
-	//pr_info("sgx_vma_access addr: 0x%lx, buf: 0x%lx, len: 0x%x, write: %d", addr, (unsigned long)buf, len, write);
 	/*
 	 * If process was forked, VMA is still there but vm_private_data is set
 	 * to NULL.
 	 */
+	if (unlikely(!enclave_array))
+		return -EFAULT;
+
+	encl = xa_load(vma->vm_private_data, (unsigned long)vma->vm_mm);
+	
+	data = kzalloc(sizeof(unsigned long) ,GFP_KERNEL);
+	//pr_info("sgx_vma_access addr: 0x%lx, buf: 0x%lx, len: 0x%x, write: %d", addr, (unsigned long)buf, len, write);
 	if (!encl)
 		return -EFAULT;
 
@@ -686,6 +1101,7 @@ const struct vm_operations_struct sgx_vm_ops = {
 	.fault = sgx_vma_fault,
 	.mprotect = sgx_vma_mprotect,
 	.open = sgx_vma_open,
+	.close = sgx_vma_close,
 	.access = sgx_vma_access,
 };
 
@@ -709,6 +1125,61 @@ void sgx_encl_release(struct kref *ref)
 	unsigned long index;
 #endif
 	unsigned long sync_vfn;
+	struct sgx_encl_mm *encl_mm;
+	pr_info("enclave start releasing\n");
+	/*
+	 * Drain the remaining mm_list entries. At this point the list contains
+	 * entries for processes, which have closed the enclave file but have
+	 * not exited yet. The processes, which have exited, are gone from the
+	 * list by sgx_mmu_notifier_release().
+	 */
+	for ( ; ; )  {
+		spin_lock(&encl->mm_lock);
+
+		if (list_empty(&encl->mm_list)) {
+			encl_mm = NULL;
+		} else {
+			encl_mm = list_first_entry(&encl->mm_list,
+						   struct sgx_encl_mm, list);
+			list_del_rcu(&encl_mm->list);
+		}
+
+		spin_unlock(&encl->mm_lock);
+
+		/* The enclave is no longer mapped by any mm. */
+		if (!encl_mm)
+			break;
+
+		synchronize_srcu(&encl->srcu);
+		mmu_notifier_unregister(&encl_mm->mmu_notifier, encl_mm->mm);
+		kfree(encl_mm);
+	}
+
+
+	if (test_bit(SGX_ENCL_CLONE, &encl->flags)) {
+		sgx_enclave_clone_abort(encl);
+	}
+
+	// First remove all the unused cache pages by ECCLEARCACHE
+	// Then Sync all the updates and release the sync page
+	// Skip if the enclave is cloned and not initialized
+	if (encl->attributes & SGX_ATTR_CLONE && 
+		encl->cow_sync_page.epc_page) {
+		struct enclave_clone_sync_entry* clone_sync_entry;
+		int ret;
+		ret = __ecclearcache(sgx_get_epc_phys_addr(encl->secs.epc_page));
+		if (ret) {
+			pr_err("ECCLEARCACHE failed with ret %d!", ret);
+		}
+		
+		clone_sync_entry = xa_erase(&clone_sync_array, encl->secs.epc_page->pfn);
+		sync_page_once(clone_sync_entry, true);
+		synchronize_rcu();
+		sgx_free_epc_page(encl->cow_sync_page.epc_page, sgx_get_epc_phys_addr(encl->secs.epc_page));
+		encl->secs_child_cnt--;
+		encl->cow_sync_page.epc_page = NULL;
+		kfree(clone_sync_entry);
+	}
 
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 20, 0))
 	radix_tree_for_each_slot(slot, &encl->page_tree, &iter, 0) {
@@ -724,7 +1195,7 @@ void sgx_encl_release(struct kref *ref)
 			//if (sgx_unmark_page_reclaimable(entry->epc_page))
 			//	continue;
 
-			sgx_free_epc_page(entry->epc_page);
+			sgx_free_epc_page(entry->epc_page, sgx_get_epc_phys_addr(encl->secs.epc_page));
 			encl->secs_child_cnt--;
 			entry->epc_page = NULL;
 		}
@@ -749,8 +1220,12 @@ void sgx_encl_release(struct kref *ref)
 	xa_destroy(&encl->sync_array);
 	xa_destroy(&encl->tcs_array);
 
+	if (encl->secs_child_cnt) {
+		pr_err("sgx_encl_release has unreleased child page, count: %d\n",encl->secs_child_cnt);
+	}
+
 	if (!encl->secs_child_cnt && encl->secs.epc_page) {
-		sgx_free_epc_page(encl->secs.epc_page);
+		sgx_free_epc_page(encl->secs.epc_page, sgx_get_epc_phys_addr(encl->secs.epc_page));
 		encl->secs.epc_page = NULL;
 	}
 
@@ -775,6 +1250,7 @@ void sgx_encl_release(struct kref *ref)
 	WARN_ON_ONCE(encl->secs_child_cnt);
 	WARN_ON_ONCE(encl->secs.epc_page);
 
+	pr_info("enclave released\n");
 	kfree(encl);
 }
 
@@ -848,14 +1324,19 @@ static int sgx_mmu_notifier_invalidate(struct mmu_notifier *mn,
 	struct sgx_encl_sync_page *sync_entry;
 	struct sgx_encl_mm *encl_mm = container_of(mn, struct sgx_encl_mm, mmu_notifier);
 
+	//pr_info("mmu_notifier start，range start=0x%lx, end=0x%lx\n", range->start, range->end);
 	encl = encl_mm->encl;
 	mm = encl_mm->mm;
 	mutex_lock(&encl->lock);
 	xa_for_each_range(&encl->sync_array, sync_vfn, sync_entry, start, last) {
+		// pr_info("eunsync: paddr=0x%llx, vaddr=0x%lx， mm=0x%lx\n",
+        // sync_entry->paddr, sync_vfn << PAGE_SHIFT, (unsigned long)mm);
 		sgx_encl_eunsync(encl, sync_entry->paddr, sync_vfn << PAGE_SHIFT);
 		xa_erase(&encl->sync_array, sync_vfn);
+		kfree(sync_entry);
 	}
 	mutex_unlock(&encl->lock);
+	//pr_info("mmu_notifier end\n");
 
 	return 0;
 }
@@ -1010,6 +1491,7 @@ void sgx_encl_put_backing(struct sgx_backing *backing, bool do_write)
 }
 */
 
+/*
 static int sgx_encl_test_and_clear_young_cb(pte_t *ptep,
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 3, 0))
     #if( defined(RHEL_RELEASE_VERSION) && defined(RHEL_RELEASE_CODE))
@@ -1033,7 +1515,7 @@ static int sgx_encl_test_and_clear_young_cb(pte_t *ptep,
 
 	return ret;
 }
-
+*/
 /**
  * sgx_encl_test_and_clear_young() - Test and reset the accessed bit
  * @mm:		mm_struct that is checked
@@ -1044,6 +1526,7 @@ static int sgx_encl_test_and_clear_young_cb(pte_t *ptep,
  *
  * Return: 1 if the page has been recently accessed and 0 if not.
  */
+/*
 int sgx_encl_test_and_clear_young(struct mm_struct *mm,
 				  struct sgx_encl_page *page)
 {
@@ -1066,7 +1549,7 @@ int sgx_encl_test_and_clear_young(struct mm_struct *mm,
 
 	return ret;
 }
-
+*/
 /**
  * sgx_alloc_va_page() - Allocate a Version Array (VA) page
  *

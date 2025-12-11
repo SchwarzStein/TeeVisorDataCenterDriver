@@ -22,9 +22,11 @@
 
 /* Pages, which are being tracked by the page reclaimer. */
 #define SGX_EPC_PAGE_RECLAIMER_TRACKED	BIT(0)
+#define SGX_EPC_PAGE_BLOCK_CACHE		BIT(1)
 
 struct sgx_epc_page {
 	unsigned long pfn;
+	atomic_long_t counter;
 	unsigned int flags;
 	struct sgx_encl_page *owner;
 	struct list_head list;
@@ -62,6 +64,11 @@ static inline unsigned long sgx_get_epc_phys_addr(struct sgx_epc_page *page)
 	return PFN_PHYS(page->pfn);
 }
 
+static inline void * sgx_get_epc_virt_addr(struct sgx_epc_page *page)
+{
+	return phys_to_virt(PFN_PHYS(page->pfn));
+}
+
 /*
 static inline unsigned long sgx_get_epc_phys_addr(struct sgx_epc_page *page)
 {
@@ -85,11 +92,12 @@ static inline void *sgx_get_epc_virt_addr(struct sgx_epc_page *page)
 
 */
 struct sgx_epc_page *__sgx_alloc_epc_page(void);
-void sgx_free_epc_page(struct sgx_epc_page *page);
+void sgx_free_epc_page(struct sgx_epc_page *epc_page, unsigned long secs);
 void sgx_free_epc_page_pre_eadd(struct sgx_epc_page *epc_page);
 
 //void sgx_mark_page_reclaimable(struct sgx_epc_page *page);
 //int sgx_unmark_page_reclaimable(struct sgx_epc_page *page);
+struct sgx_epc_page *sgx_alloc_epc_page_cache(void *owner, unsigned long pfn);
 struct sgx_epc_page *sgx_alloc_epc_page(void *owner, bool reclaim);
 
 #endif /* _X86_SGX_H */

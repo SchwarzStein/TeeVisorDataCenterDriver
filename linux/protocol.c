@@ -63,7 +63,7 @@ static inline int svsm_process_enclave_result_codes(struct svsm_call *call)
 		//pr_err("get exception %lld", SVSM_ENCLAVE_FAULT(call->rax_out));
         return (int)(ENCLS_FAULT_FLAG | SVSM_ENCLAVE_FAULT(call->rax_out));
 	default:
-		pr_err("get error code 0x%llx", call->rax_out);
+		//pr_err("get error code 0x%llx", call->rax_out);
 		return (int)SVSM_ENCLAVE_ERROR(call->rax_out);
 	}
 }
@@ -176,7 +176,7 @@ int snp_sgx_enclu(struct sgx_eenter_args *param)
 	return ret;
 }
 
-struct svsm_eaddb_call * get_eaddb_buffer_page(void)
+void *get_buffer_page(void)
 {
 	struct svsm_eaddb_call *buffer;
 

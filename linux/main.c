@@ -41,13 +41,18 @@ static void (*k_mmput_async)(struct mm_struct *mm);
 // struct sgx_epc_section sgx_epc_sections[SGX_MAX_EPC_SECTIONS];
 // static int sgx_nr_epc_sections;
 // static struct task_struct *ksgxd_tsk;
-static DECLARE_WAIT_QUEUE_HEAD(ksgxd_waitq);
+//static DECLARE_WAIT_QUEUE_HEAD(ksgxd_waitq);
+static struct task_struct *kenclaved_tsk;
+static DECLARE_WAIT_QUEUE_HEAD(kenclaved_waitq);
 
 /*
  * These variables are part of the state of the reclaimer, and must be accessed
  * with sgx_reclaimer_lock acquired.
  */
-static LIST_HEAD(sgx_active_page_list);
+//static LIST_HEAD(sgx_active_page_list);
+
+DEFINE_XARRAY(clone_sync_array);
+DEFINE_XARRAY(cache_block_array);
 
 // This list is stores all the allocated page.
 static LIST_HEAD(sgx_page_pool);
@@ -617,6 +622,7 @@ struct sgx_epc_page *__sgx_alloc_epc_page(void)
 {
 	struct sgx_epc_page *epc_page;
 	epc_page = vmalloc(sizeof(struct sgx_epc_page));
+	atomic_long_set_release(&epc_page->counter, 1);
 	epc_page->flags = 0;
 	epc_page->owner = NULL;
 	struct page *page = alloc_page(GFP_KERNEL);
@@ -679,6 +685,28 @@ spin_unlock(&sgx_reclaimer_lock);
 return 0;
 }
 */
+
+struct sgx_epc_page *sgx_alloc_epc_page_cache(void *owner, unsigned long pfn)
+{
+	struct sgx_epc_page *epc_page;
+	epc_page = vmalloc(sizeof(struct sgx_epc_page));
+	if (!epc_page) {
+		return NULL;
+	}
+	atomic_long_set_release(&epc_page->counter, 1);
+	//pr_info("sgx_alloc_epc_page_cache pfn: %lx", pfn);
+	epc_page->pfn = pfn;
+	epc_page->flags = SGX_EPC_PAGE_BLOCK_CACHE;
+	epc_page->owner = owner;
+
+	spin_lock(&sgx_page_pool_lock);
+	list_add_tail(&epc_page->list, &sgx_page_pool);
+	spin_unlock(&sgx_page_pool_lock);
+
+	
+	return epc_page;
+}
+
 /**
  * sgx_alloc_epc_page() - Allocate an EPC page
  * @owner:	the owner of the EPC page
@@ -709,8 +737,13 @@ struct sgx_epc_page *sgx_alloc_epc_page(void *owner, bool reclaim)
 			break;
 		}
 
+		/*
 		if (list_empty(&sgx_active_page_list))
 			return ERR_PTR(-ENOMEM);
+		*/
+
+		// If reclaim is not supported, just return enomem
+		return ERR_PTR(-ENOMEM);
 
 		if (!reclaim)
 		{
@@ -767,25 +800,66 @@ void sgx_free_epc_page(struct sgx_epc_page *page)
  *
  * Call EREMOVE for an EPC page
  */
-void sgx_free_epc_page(struct sgx_epc_page *epc_page)
+void sgx_free_epc_page(struct sgx_epc_page *epc_page, unsigned long secs)
 {
 	int ret;
-	struct page *page = pfn_to_page(epc_page->pfn);
 
-	WARN_ON_ONCE(epc_page->flags & SGX_EPC_PAGE_RECLAIMER_TRACKED);
+	//WARN_ON_ONCE(epc_page->flags & SGX_EPC_PAGE_RECLAIMER_TRACKED);
+retry:
+	ret = __eremove(sgx_get_epc_phys_addr(epc_page), secs);
 
-	ret = __eremove(sgx_get_epc_phys_addr(epc_page));
+	// Cloned enclave share one epcm with parent, in epcm contention cases, retry
+	if(ret == (ENCLS_FAULT_FLAG | X86_TRAP_GP)) {
+		pr_info("sgx_free_epc_page EPCM lock contention, retry\n");
+		goto retry;
+	}
+
 	if (ret)
 	{
-		pr_err("EREMOVE returned %d (0x%x)", ret, ret);
+		pr_err("EREMOVE page paddr: 0x%lx returned %d (0x%x), vaddr: 0x%lx", 
+				sgx_get_epc_phys_addr(epc_page), ret, ret, epc_page->owner->desc);
 		return;
 	}
 
-	spin_lock(&sgx_page_pool_lock);
-	list_del_init(&epc_page->list);
-	spin_unlock(&sgx_page_pool_lock);
-	__free_page(page);
-	vfree(epc_page);
+	long epc_counter = atomic_long_dec_return_release(&epc_page->counter);
+	// unsigned long page_vaddr;
+	// if (epc_page->owner) {
+	// 	page_vaddr = epc_page->owner->desc;
+	// } else {
+	// 	page_vaddr = 0;
+	// }
+	
+	// // pr_info("sgx_free_epc_page epc_counter: %ld paddr: 0x%lx vaddr: 0x%lx\n", 
+	// // 	epc_counter,sgx_get_epc_phys_addr(epc_page), page_vaddr);
+	if (epc_counter == 0) {
+		spin_lock(&sgx_page_pool_lock);
+		list_del_init(&epc_page->list);
+		spin_unlock(&sgx_page_pool_lock);
+		if (!(epc_page->flags & SGX_EPC_PAGE_BLOCK_CACHE)) {
+			struct page *page = pfn_to_page(epc_page->pfn);
+			__free_page(page);
+		} else {
+			struct enclave_cache_block_entry* block_entry;
+			unsigned long size_pages;
+
+			block_entry = xa_find(&cache_block_array, &epc_page->pfn, ULONG_MAX, XA_PRESENT);
+			if (!block_entry) {
+				pr_err("Invalid cache epc_page, cannot find the backend block!");
+			}
+
+			long block_counter = atomic_long_dec_return_acquire(&block_entry->counter);
+			//pr_info("block_counter %ld\n", block_counter);
+			if (block_counter == 0 && atomic_long_read_acquire(&block_entry->consumed)) {
+				//pr_info("Free page block\n");
+				size_pages = (block_entry->end - block_entry->start + PAGE_SIZE) >> PAGE_SHIFT;
+				free_pages((unsigned long)phys_to_virt(block_entry->start), fls(size_pages) - 1);
+				xa_erase(&cache_block_array, PFN_DOWN(block_entry->end));
+				kfree(block_entry);
+			}
+		}
+		vfree(epc_page);
+	}
+
 }
 
 /**
@@ -898,6 +972,7 @@ static struct sgx_encl *get_encl_from_vaddr(unsigned long vaddr)
 	struct vm_area_struct *vma;
 	struct mm_struct *mm;
 	struct task_struct *tsk;
+	struct xarray *enclave_array;
 	struct sgx_encl *encl = NULL;
 	int ret;
 
@@ -907,7 +982,10 @@ static struct sgx_encl *get_encl_from_vaddr(unsigned long vaddr)
 	ret = sgx_encl_find(mm, vaddr, &vma);
 
 	if (!ret)
-		encl = (struct sgx_encl *)vma->vm_private_data;
+	{
+		enclave_array = vma->vm_private_data;
+		encl = xa_load(enclave_array, (unsigned long)vma->vm_mm);
+	}
 
 	return encl;
 }
@@ -1074,7 +1152,7 @@ retry:
 			// If the vaddr has already been synced, first try to unsync
 			if (sync_entry)
 			{
-				pr_info("eunsync address: 0x%lx, paddr: 0x%llx", address, sync_entry->paddr);
+				//pr_info("eunsync address: 0x%lx, paddr: 0x%llx", address, sync_entry->paddr);
 				ret = sgx_encl_eunsync(encl, sync_entry->paddr, address);
 				if (ret)
 				{
@@ -1121,6 +1199,11 @@ retry:
 			encl->sync_page_cnt++;
 			sync_entry->paddr = paddr;
 			old_sync_entry = xa_store(&encl->sync_array, PFN_DOWN(address), sync_entry, GFP_KERNEL);
+
+			if (xa_is_err(old_sync_entry)) {
+				pr_err("esync OOM");
+				goto sync_fail_page;
+			}
 
 			if (old_sync_entry)
 			{
@@ -1239,6 +1322,11 @@ static void emulate_enclu(struct callback_head *work)
 		return;
 	}
 
+	if (test_bit(SGX_ENCL_CLONE, &encl->flags)) {
+		cond_resched();
+		return;
+	}
+
 	entry = xa_load(&encl->tcs_array, PFN_DOWN(tcs_vaddr));
 	if (!entry)
 	{
@@ -1280,9 +1368,13 @@ static void emulate_enclu(struct callback_head *work)
 	//pr_info("return from enclu");
 	//trace_printk("output param: ");
 	//dump_sgx_args(&param);
+	if (ret == SGX_ENCLAVE_CLONING) {
+		cond_resched();
+		return;
+	}
 	if (ret)
 	{
-		pr_err("enclu failed");
+		pr_err("enclu failed with ret: %d", ret);
 		do_trap(X86_TRAP_GP, SIGSEGV, regs, 0, 0, (void *)regs->ip);
 		return;
 	}
@@ -1305,6 +1397,7 @@ static void emulate_enclu(struct callback_head *work)
 	regs->r15 = param.r15;
 	regs->ip = param.rip;
 
+	//pr_info("param.exit_reason %d", param.exit_reason);
 	switch (param.exit_reason)
 	{
 	case EXIT_REASON_INTERRUPT:
@@ -1355,9 +1448,6 @@ static void emulate_enclu(struct callback_head *work)
 		case X86_TRAP_NMI:
 			pr_err("nmi\n");
 			break;
-		case TIMER:
-			cond_resched();
-			break;
 		default:
 			pr_info("Unexpected interrupt %lld in enclave\n", param.vector);
 			break;
@@ -1366,10 +1456,96 @@ static void emulate_enclu(struct callback_head *work)
 	case EXIT_REASON_EEXIT:
 		//pr_info("EXIT_REASON_EEXIT");
 		break;
+	case EXIT_REASON_TIMER:
+		cond_resched();
+		break;
+	case EXIT_REASON_CLONE:
+		set_bit(SGX_ENCL_CLONE, &encl->flags);
+		break;
+	// No enough cache for the copy on write. Add new cache block.
+	case EXIT_REASON_CACHE:
+		mutex_lock(&encl->lock);
+		ret = add_enclave_cache_block(encl);
+		mutex_unlock(&encl->lock);
+		if (ret) {
+			do_trap(X86_TRAP_GP, SIGSEGV, regs, 0, 0, (void *)regs->ip);
+		}
+		break;
+	// No free slot in the clone sync page, handle the page here.
+	case EXIT_REASON_NO_FREE_SLOT:
+		try_do_sync_page(encl);
+		break;
 	default:
 		break;
 	}
 	kfree(work);
+}
+
+void try_do_sync_page(struct sgx_encl *encl)
+{
+	struct enclave_clone_sync_entry* sync_entry;
+	sync_entry = xa_load(&clone_sync_array, encl->secs.epc_page->pfn);
+	if (!sync_entry) {
+		pr_err("sync page does not exist in the clone_sync_array\n");
+		return;
+	}
+	sync_page_once(sync_entry, false);
+	return;
+}
+
+// Enclave lock should be acquire before calling the function
+int add_enclave_cache_block(struct sgx_encl *encl)
+{
+	bool get_block = false;
+	unsigned long block_addr;
+	struct enclave_cache_block_entry *block_entry;
+	int ret;
+
+	// In multi thread cases, if a block is already added, just return
+	if (encl->current_cache_block && !atomic_long_read_acquire(&encl->current_cache_block->consumed))
+	{
+		return 0;
+	}
+
+	for(unsigned int order = 10; order >= 0; order--) {
+		block_addr = __get_free_pages(GFP_KERNEL, order);
+		if (block_addr) {
+			block_entry = kmalloc(sizeof(struct enclave_cache_block_entry), GFP_KERNEL);
+			if (!block_entry) {
+				free_pages(block_addr, order);
+				pr_err("cannot allocate a block_entry for cow cache!");
+				return -ENOMEM;
+			}
+			block_entry->start = virt_to_phys((void *)block_addr);
+			block_entry->end = virt_to_phys((void *)block_addr) + ((1 << order) - 1) * PAGE_SIZE;
+			atomic_long_set_release(&block_entry->counter, 0);
+			// use the end pfn as the index since xa api only support get index forward
+			if (xa_insert(&cache_block_array, PFN_DOWN(block_entry->end), block_entry, GFP_KERNEL)) {
+				free_pages(block_addr, order);
+				kfree(block_entry);
+				pr_err("cannot insert block entry into cache block array!");
+				return -ENOMEM;
+			}
+
+			ret = __ecaddcache(sgx_get_epc_phys_addr(encl->secs.epc_page), block_entry->start, 1<<order);
+			if (ret) {
+				xa_erase(&cache_block_array, PFN_DOWN(block_entry->end));
+				free_pages(block_addr, order);
+				kfree(block_entry);
+				pr_err("ECADDCACHE returned %d\n", ret);
+				return ret;
+			}
+			get_block = true;
+			encl->current_cache_block = block_entry;
+			break;
+		}
+	}
+	if (!get_block) {
+		pr_err("cannot allocate a block for cow cache!");
+		return -ENOMEM;
+	}
+
+	return 0;
 }
 
 static int handle_die_event(struct notifier_block *self,
@@ -1420,6 +1596,156 @@ static void __exit unregister_sgx_die_notifier(void)
 	pr_info("unhook #ud\n");
 }
 
+static bool enclave_should_sync(void)
+{
+	unsigned long secs;
+	struct enclave_clone_sync_entry* sync_entry;
+	struct enclave_sync_page_slot* sync_slot;
+
+	rcu_read_lock();
+	xa_for_each(&clone_sync_array, secs, sync_entry) {
+    	sync_slot = (struct enclave_sync_page_slot*)sgx_get_epc_virt_addr(sync_entry->sync_page_epc);
+		for (int i = 0; i < SYNC_PAGE_SLOT_NUM; i++) {
+			if (sync_slot[i].state == SLOT_READY) {
+				rcu_read_unlock();
+				return true;
+			}
+		}
+	}
+	rcu_read_unlock();
+	return false;
+}
+
+void sync_page_once(struct enclave_clone_sync_entry* sync_entry, bool terminate)
+{
+	struct sgx_encl *encl;
+	struct enclave_sync_page_slot* sync_slot;
+	uint64_t old_state;
+	struct sgx_encl_page *page_entry;
+	struct enclave_cache_block_entry* block_entry;
+	struct sgx_epc_page *cache_page_epc;
+	long counter;
+	unsigned long new_paddr_pfn, block_end_paddr;
+
+	encl = sync_entry->encl;
+	mutex_lock(&sync_entry->lock);
+	mutex_lock(&encl->lock);
+	sync_slot = (struct enclave_sync_page_slot*)sgx_get_epc_virt_addr(sync_entry->sync_page_epc);
+	for (int i = 0; i < SYNC_PAGE_SLOT_NUM; i++) {
+		old_state = READ_ONCE(sync_slot[i].state);
+		if (old_state == SLOT_READY && try_cmpxchg(&sync_slot[i].state, &old_state, SLOT_READING)) {
+			// update slot if the slot is ready
+			page_entry = xa_load(&encl->page_array, PFN_DOWN(sync_slot[i].vaddr));
+			if (!page_entry || page_entry->epc_page->pfn != PFN_DOWN(sync_slot[i].old_paddr)) {
+				if (!page_entry) {
+					pr_err("page_entry does not exist!\n");
+				} else {
+					pr_err("page_entry->epc_page->pfn :%lx, old_paddr :%llx, ", page_entry->epc_page->pfn, sync_slot[i].old_paddr);
+				}
+				
+				sync_slot[i].state = SLOT_READY;
+				mutex_unlock(&encl->lock);
+				mutex_unlock(&sync_entry->lock);
+				return;
+			}
+
+			// To sync the update, first get the common epc_page and decrement the counter.
+			// Then allocate a new epc_page for the cache page and link it to the encl_page
+			counter = atomic_long_read(&page_entry->epc_page->counter);
+			if (counter < 2) {
+				pr_err("Invalid epc page to update, the page should have more than one reference!");
+				sync_slot[i].state = SLOT_READY;
+				mutex_unlock(&encl->lock);
+				mutex_unlock(&sync_entry->lock);
+				return;
+			}
+
+			pr_info("Get cache update: vaddr: 0x%llx, paddr: 0x%llx, old_paddr: 0x%llx\n", sync_slot[i].vaddr, sync_slot[i].new_paddr, sync_slot[i].old_paddr);
+			atomic_long_dec_return_release(&page_entry->epc_page->counter);
+			new_paddr_pfn = PFN_DOWN(sync_slot[i].new_paddr);
+			block_end_paddr = new_paddr_pfn;
+
+			block_entry = xa_find(&cache_block_array, &block_end_paddr, ULONG_MAX, XA_PRESENT);
+			if (!block_entry || block_entry->start > sync_slot[i].new_paddr) {
+				pr_err("Invalid new paddr, cannot find the backend block!");
+				mutex_unlock(&encl->lock);
+				mutex_unlock(&sync_entry->lock);
+				return;
+			}
+
+			atomic_long_inc_return_release(&block_entry->counter);
+			if (sync_slot[i].new_paddr == block_entry->end) {
+				atomic_long_set_release(&block_entry->consumed, 1);
+			}
+
+			cache_page_epc = sgx_alloc_epc_page_cache(page_entry, new_paddr_pfn);
+			if (cache_page_epc) {
+				page_entry->epc_page = cache_page_epc;
+				sync_slot[i].state = SLOT_FREE;
+			}
+		}
+	}
+
+	if (terminate && encl->current_cache_block) {
+		atomic_long_set_release(&encl->current_cache_block->consumed, 1);
+	}
+	mutex_unlock(&encl->lock);
+	mutex_unlock(&sync_entry->lock);
+}
+
+static void do_page_sync(void)
+{
+	unsigned long secs;
+	struct enclave_clone_sync_entry* sync_entry;
+
+	rcu_read_lock();
+	xa_for_each(&clone_sync_array, secs, sync_entry) {
+		//pr_info("do page sync secs: 0x%lx", secs);
+		sync_page_once(sync_entry, false);
+	}
+
+	rcu_read_unlock();
+
+}
+
+static int kenclaved(void *p)
+{
+	set_freezable();
+
+	while (!kthread_should_stop()) {
+		if (try_to_freeze())
+			continue;
+
+		wait_event_freezable_timeout(kenclaved_waitq,
+					kthread_should_stop() || enclave_should_sync(),
+					msecs_to_jiffies(100));
+
+		do_page_sync();
+		cond_resched();
+	}
+
+	if (!xa_empty(&clone_sync_array)) {
+		pr_err("clone_sync_array is not null when thread stop!\n");
+	}
+
+	xa_destroy(&clone_sync_array);
+	return 0;
+}
+
+static bool __init sgx_page_syncer_init(void)
+{
+	struct task_struct *tsk;
+
+	tsk = kthread_run(kenclaved, NULL, "kenclaved");
+	pr_info("start kenclaved!");
+	if (IS_ERR(tsk))
+		return false;
+
+	kenclaved_tsk = tsk;
+
+	return true;
+}
+
 static int __init sgx_init(void)
 {
 	int ret;
@@ -1446,18 +1772,22 @@ static int __init sgx_init(void)
 	// if (!sgx_page_reclaimer_init())
 	//	goto err_page_cache;
 
+	if (!sgx_page_syncer_init())
+		return -EFAULT;
+
 	ret = sgx_drv_init();
 	if (ret)
-		return -EFAULT;
-	// goto err_kthread;
+		goto err_kthread;
 
 	pr_info(DRV_DESCRIPTION " v" DRV_VERSION "\n");
 	alloc_eaddb_buffer();
 	register_sgx_die_notifier();
 	return 0;
 
-	/*
+	
 	err_kthread:
+		kthread_stop(kenclaved_tsk);
+	/*
 		kthread_stop(ksgxd_tsk);
 
 	err_page_cache:
@@ -1465,8 +1795,8 @@ static int __init sgx_init(void)
 			vfree(sgx_epc_sections[i].pages);
 			memunmap(sgx_epc_sections[i].virt_addr);
 		}
-		return -EFAULT;
 	*/
+		return -EFAULT;
 }
 module_init(sgx_init);
 
@@ -1474,19 +1804,36 @@ static void __exit sgx_exit(void)
 {
 	// int i;
 	sgx_drv_exit();
+	kthread_stop(kenclaved_tsk);
 	// kthread_stop(ksgxd_tsk);
 	struct sgx_epc_page *epc_page;
+	unsigned long index, size_pages;
+	struct enclave_cache_block_entry *block_entry;
 
 	spin_lock(&sgx_page_pool_lock);
 	while (!list_empty(&sgx_page_pool))
 	{
 		epc_page = list_first_entry(&sgx_page_pool, struct sgx_epc_page, list);
 		list_del_init(&epc_page->list);
-		pr_info("remove page %lx when module exit\n", sgx_get_epc_phys_addr(epc_page));
-		sgx_free_epc_page(epc_page);
+		pr_info("page %lx is not freed when module exit\n", sgx_get_epc_phys_addr(epc_page));
+		//sgx_free_epc_page(epc_page);
 	}
 	spin_unlock(&sgx_page_pool_lock);
+	
+	rcu_read_lock();
+	xa_for_each(&cache_block_array, index, block_entry) {
+		if (atomic_long_read_acquire(&block_entry->counter) && atomic_long_read_acquire(&block_entry->consumed)) {
+			pr_err("cache block unreleased when module exit start:0x%llx, end:0x%llx\n", block_entry->start, block_entry->end);
+		} else {
+			//pr_info("Release free block\n");
+			size_pages = (block_entry->end - block_entry->start + PAGE_SIZE) >> PAGE_SHIFT;
+			free_pages((unsigned long)phys_to_virt(block_entry->start), fls(size_pages) - 1);
+			kfree(block_entry);
+		}
+	}
+	rcu_read_unlock();
 
+	xa_destroy(&cache_block_array);
 	unregister_sgx_die_notifier();
 	release_eaddb_buffer();
 	pr_info(DRV_DESCRIPTION " v" DRV_VERSION " removed\n");

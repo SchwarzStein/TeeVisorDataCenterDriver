@@ -187,6 +187,10 @@ struct sgx_pageinfo {
 	u64 secs;
 } __packed __aligned(32);
 
+struct sgx_cloneinfo_block {
+	u64 vaddr;
+	u64 paddr;
+};
 
 /**
  * enum sgx_page_type - bits in the SECINFO flags defining the page type
@@ -202,7 +206,8 @@ enum sgx_page_type {
 	SGX_PAGE_TYPE_REG,
 	SGX_PAGE_TYPE_VA,
 	SGX_PAGE_TYPE_TRIM,
-	SGX_PAGE_TYPE_HANDLER = 7
+	SGX_PAGE_TYPE_HANDLER = 7,
+	SGX_PAGE_TYPE_COWCACHE = 8,
 };
 
 #define SGX_NR_PAGE_TYPES	5
@@ -339,6 +344,14 @@ struct sgx_sigstruct {
 	u8  q1[SGX_MODULUS_SIZE];
 	u8  q2[SGX_MODULUS_SIZE];
 } __packed;
+
+struct sgx_clone_info {
+	u8 hash[32];
+	u64 parent_secs;
+	u64 child_secs;
+	u64 total_page_num;
+	u64 metadata_page_num;
+} __packed __aligned(64);
 
 #define SGX_LAUNCH_TOKEN_SIZE 304
 
