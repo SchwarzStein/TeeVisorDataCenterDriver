@@ -1,0 +1,30 @@
+test case
+1. write memory
+*2. eaccept
+3. emodp
+4. ereport
+5. esetussa
+6. emodt(Ocall ENCLS)
+7. read
+
+we have an allocated memory range, after fork parent child will do one of them to the memory
+
+
+eaccpet uses pt_trim for testing, emodt should be call before the fork
+
+
+EMODT before       test case        expected result
+    ✘                  1            no error
+    ✘                  2            #PF
+    ✘                  3            no error
+    ✘                  4            no error
+    ✘                  5            no error
+    ✘                  6            no error
+    ✘                  7            no error
+    ✔                  1            #PF
+    ✔                  2            no error
+    ✔                  3            #PF
+    ✔                  4            #PF
+    ✔                  5            SGX_INVALID_USSA
+    ✔                  6            FAIL
+    ✔                  7            #PF
