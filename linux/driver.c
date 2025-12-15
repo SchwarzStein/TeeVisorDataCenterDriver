@@ -10,9 +10,13 @@
 #include "driver.h"
 #include "encl.h"
 #include "dcap.h"
+#include "protocol.h"
 
 #include "version.h"
 
+unsigned int measure_index = 0;
+module_param(measure_index, uint, 0644);
+MODULE_PARM_DESC(measure_index, "An integer parameter to select the instruction to be measured.");
 MODULE_DESCRIPTION(DRV_DESCRIPTION);
 MODULE_AUTHOR("Yiliang Dong <dongyiliangsteven@163.com>");
 MODULE_LICENSE("Dual BSD/GPL");
@@ -231,6 +235,12 @@ int __init sgx_drv_init(void)
 	sgx_misc_reserved_mask = SGX_MISC_RESERVED_MASK;
 	if (boot_cpu_has(X86_FEATURE_OSXSAVE) && boot_cpu_has(X86_FEATURE_AVX)) {
 		sgx_xfrm_reserved_mask = ~0x7;
+	}
+
+	if (measure_index > SVSM_ENCL_MAX) {
+		pr_err("measure_index parameter %u invalid, should be between 0 and %u\n", 
+			measure_index, SVSM_ENCL_MAX - 1);
+		return -EINVAL;
 	}
 
 	int ret = misc_register(&sgx_dev_enclave);
