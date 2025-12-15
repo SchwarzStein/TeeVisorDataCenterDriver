@@ -31,6 +31,7 @@
 #define SVSM_ENCL_EADDCOWCACHE 18
 #define SVSM_ENCL_ECLEARCOWCACHE 19
 #define SVSM_ENCL_ECSYNC 20
+#define SVSM_ENCL_MAX 21
 
 #define SVSM_ERR_PROTOCOL 0x80001000
 #define SVSM_ENCLAVE_PROTOCOL_BASE 800
@@ -126,6 +127,9 @@ struct svsm_ecaddinfo_call {
 
 	struct sgx_cloneinfo_block cloneinfo[];
 }__attribute__((packed));
+
+
+extern unsigned int measure_index;
 
 int snp_sgx_encls(unsigned long index, unsigned long rcx, unsigned long rdx, unsigned long r8);
 int snp_sgx_enclu(struct sgx_eenter_args *param);
