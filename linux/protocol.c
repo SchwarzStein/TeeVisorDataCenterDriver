@@ -1,5 +1,6 @@
 #include <asm/traps.h>
 #include <linux/sched/signal.h>
+#include <linux/clocksource.h>
 #include "protocol.h"
 #include "encls.h"
 
@@ -120,6 +121,7 @@ int snp_sgx_encls(unsigned long index, unsigned long rcx, unsigned long rdx, uns
     struct svsm_ca *caa;
 	struct svsm_call call = {};
     u64 caa_pa;
+	u64 tcs0, tcs1;
 
 	flags = native_local_irq_save();
 
@@ -137,7 +139,12 @@ int snp_sgx_encls(unsigned long index, unsigned long rcx, unsigned long rdx, uns
 	call.r8 = r8;
 
 	call.rax = SVSM_ENCL_CALL(index);
+	tcs0 = get_cycles();
 	ret = svsm_perform_call_protocol(&call, SVSM_VMPL);
+	tcs1 = get_cycles();
+	if (index == measure_index) {
+		trace_printk("svsm protocol index %lu took %llu cycles\n", index, tcs1 - tcs0);
+	}
 	native_local_irq_restore(flags);
 	return ret;
 }
