@@ -41,6 +41,8 @@ enum sgx_page_flags {
 	_IO(SGX_MAGIC, 0x09)
 #define SGX_IOC_ENCLAVE_CLONE_RESULT \
 	_IO(SGX_MAGIC, 0x0a)
+#define SGX_IOC_ENCLAVE_REGISTER_LOG_BUFFER \
+	_IOW(SGX_MAGIC, 0x0b, int)
 
 /**
  * struct sgx_enclave_create - parameter structure for the

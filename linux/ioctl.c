@@ -1644,7 +1644,7 @@ long sgx_enclave_clone_abort(struct sgx_encl *encl)
 	}
 
 	mutex_lock(&encl->lock);
-	pr_info("sgx_enclave_clone_abort ECABORT");
+	//pr_info("sgx_enclave_clone_abort ECABORT");
 	ret =  __ecabort(sgx_get_epc_phys_addr(encl->secs.epc_page));
 
 	if (ret) {
@@ -1698,6 +1698,17 @@ static long sgx_ioc_enclave_clone_result(struct sgx_encl *encl)
 	return test_bit(SGX_ENCL_CLONE_FAIL, &encl->flags);
 }
 
+static long sgx_ioc_enclave_register_buffer(struct sgx_encl *encl, int arg)
+{
+	// Just set a flag here, the actual buffer info is in the shared memory page
+	if (arg) {
+		set_bit(SGX_ENCL_LOG, &encl->flags);
+	} else {
+		clear_bit(SGX_ENCL_LOG, &encl->flags);
+	}
+	return 0;
+}
+
 long sgx_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
 {
 	struct sgx_encl *encl;
@@ -1743,6 +1754,9 @@ long sgx_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
 		break;
 	case SGX_IOC_ENCLAVE_CLONE_RESULT:
 		ret = sgx_ioc_enclave_clone_result(encl);
+		break;
+	case SGX_IOC_ENCLAVE_REGISTER_LOG_BUFFER:
+		ret = sgx_ioc_enclave_register_buffer(encl, (int)arg);
 		break;
 	default:
 		ret = -ENOIOCTLCMD;

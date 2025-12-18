@@ -8,6 +8,9 @@ static DEFINE_PER_CPU(struct svsm_ca *, svsm_caa) = NULL;
 static DEFINE_PER_CPU(struct svsm_eaddb_call *, eaddb_buffer) = NULL;
 static DEFINE_PER_CPU(u64, svsm_caa_pa);
 
+void* shared_page = NULL;
+int shared_page_counter = 0;
+
 static inline u64 sev_snp_rd_caa_msr(void)
 {
 	return __rdmsr(MSR_SVSM_CAA);
@@ -73,6 +76,7 @@ static int svsm_perform_msr_protocol(struct svsm_call *call, u64 target_vmpl)
 {
 	u8 pending = 0;
 	u64 val, resp;
+	u64 tsc0, tsc1;
 	
 	/*
 	 * When using the MSR protocol, be sure to save and restore
@@ -82,7 +86,9 @@ static int svsm_perform_msr_protocol(struct svsm_call *call, u64 target_vmpl)
 
 	sev_es_wr_ghcb_msr(_GHCB_MSR_VMPL_REQ_LEVEL(target_vmpl));
 
+	tsc0 = get_cycles();
 	svsm_issue_call(call, &pending);
+	tsc1 = get_cycles();
 
 	resp = sev_es_rd_ghcb_msr();
 
@@ -96,6 +102,14 @@ static int svsm_perform_msr_protocol(struct svsm_call *call, u64 target_vmpl)
 
 	if (GHCB_MSR_VMPL_RESP_VAL(resp))
 		return -EINVAL;
+
+	if (measure_index == SVSM_ENCL_MAX && call->rax_out == SVSM_SUCCESS) {
+		write_log_buffer(DRIVER_BEFORE_VMPL_SWITCH((call->rax & 0xff)), tsc0);
+		write_log_buffer(DRIVER_AFTER_VMPL_SWITCH((call->rax & 0xff)), tsc1);
+	} else if (SVSM_ENCL_CALL(measure_index) == call->rax && call->rax_out == SVSM_SUCCESS) {
+		write_log_buffer(DRIVER_BEFORE_VMPL_SWITCH(measure_index), tsc0);
+		write_log_buffer(DRIVER_AFTER_VMPL_SWITCH(measure_index), tsc1);
+	}
 
 	return svsm_process_enclave_result_codes(call);
 }
@@ -121,7 +135,7 @@ int snp_sgx_encls(unsigned long index, unsigned long rcx, unsigned long rdx, uns
     struct svsm_ca *caa;
 	struct svsm_call call = {};
     u64 caa_pa;
-	u64 tcs0, tcs1;
+	
 
 	flags = native_local_irq_save();
 
@@ -139,12 +153,8 @@ int snp_sgx_encls(unsigned long index, unsigned long rcx, unsigned long rdx, uns
 	call.r8 = r8;
 
 	call.rax = SVSM_ENCL_CALL(index);
-	tcs0 = get_cycles();
 	ret = svsm_perform_call_protocol(&call, SVSM_VMPL);
-	tcs1 = get_cycles();
-	if (index == measure_index) {
-		trace_printk("svsm protocol index %lu took %llu cycles\n", index, tcs1 - tcs0);
-	}
+
 	native_local_irq_restore(flags);
 	return ret;
 }
@@ -215,4 +225,18 @@ void release_eaddb_buffer(void)
 		}
         per_cpu(eaddb_buffer, cpu) = NULL;
     }
+}
+
+void write_log_buffer(u64 val, u64 tcs) {
+	if (shared_page_counter == 255) {
+		return;
+	}
+	*(u64 *)(shared_page + shared_page_counter * 16) = val;
+	*(u64 *)(shared_page + shared_page_counter * 16 + 8) = tcs;
+	shared_page_counter += 1;
+}
+
+void initialize_shared_page() {
+	memset(shared_page, 0 ,PAGE_SIZE);
+	shared_page_counter = 0;
 }
