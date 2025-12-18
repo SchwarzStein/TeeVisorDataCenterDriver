@@ -15,8 +15,11 @@
 #include "version.h"
 
 unsigned int measure_index = 0;
+unsigned int enclu_detail = 0;
 module_param(measure_index, uint, 0644);
+module_param(enclu_detail, uint, 0644);
 MODULE_PARM_DESC(measure_index, "An integer parameter to select the instruction to be measured.");
+MODULE_PARM_DESC(enclu_detail, "A bool to decide if whether print enlu detailed measurement.");
 MODULE_DESCRIPTION(DRV_DESCRIPTION);
 MODULE_AUTHOR("Yiliang Dong <dongyiliangsteven@163.com>");
 MODULE_LICENSE("Dual BSD/GPL");
@@ -189,6 +192,23 @@ static int sgx_mmap(struct file *file, struct vm_area_struct *vma)
 		return -ENODEV;
 	}
 
+	if (test_bit(SGX_ENCL_LOG, &encl->flags)) {
+		unsigned long pfn;
+		if ((vma->vm_end - vma->vm_start) != PAGE_SIZE)
+        	return -EINVAL;
+		
+		pfn = virt_to_phys(shared_page) >> PAGE_SHIFT;
+		vma->vm_page_prot = vm_get_page_prot(vma->vm_flags);
+		vm_flags_set(vma, VM_IO | VM_DONTEXPAND | VM_DONTDUMP);
+
+		initialize_shared_page();
+		return remap_pfn_range(vma,
+                           vma->vm_start,
+                           pfn,
+                           PAGE_SIZE,
+                           vma->vm_page_prot);
+	}
+
 	ret = sgx_encl_may_map(encl, vma->vm_start, vma->vm_end, vma->vm_flags);
 	if (ret)
 		return ret;
@@ -297,9 +317,15 @@ int __init sgx_drv_init(void)
 		sgx_xfrm_reserved_mask = ~0x7;
 	}
 
-	if (measure_index > SVSM_ENCL_MAX) {
-		pr_err("measure_index parameter %u invalid, should be between 0 and %u\n", 
-			measure_index, SVSM_ENCL_MAX - 1);
+	if (measure_index > SVSM_ENCL_MAX && measure_index != SVSM_MEASURE_CLONE_TOTAL) {
+		pr_err("measure_index parameter %u invalid, should be between 0 and %u or equals 100.\n", 
+			measure_index, SVSM_ENCL_MAX);
+		return -EINVAL;
+	}
+
+	if (enclu_detail > 1) {
+		pr_err("enclu_detail parameter %u invalid, should be between 0 and 1\n", 
+			enclu_detail);
 		return -EINVAL;
 	}
 

@@ -5,6 +5,7 @@
 #include <linux/mm.h>
 #include <linux/mman.h>
 #include <linux/shmem_fs.h>
+#include <linux/clocksource.h>
 #include <linux/suspend.h>
 #include <linux/sched/mm.h>
 #include "arch.h"
@@ -794,7 +795,7 @@ static void sgx_vma_open(struct vm_area_struct *vma)
 		if (parent_encl && parent_encl->clone_info) {
 			clone = true;
 			pr_info("start clone!\n");
-			
+			uint64_t tcs0 = get_cycles();
 			// do eclone if child is binded
 			encl = clone_enclave(parent_encl);
 			// Register the sync page after child is cloned
@@ -843,6 +844,11 @@ static void sgx_vma_open(struct vm_area_struct *vma)
 			} else {
 				pr_err("clone_enclave failed\n");
 				goto encl_open_failed;
+			}
+			uint64_t tcs1 = get_cycles();
+			if (measure_index == SVSM_MEASURE_CLONE_TOTAL) {
+				write_log_buffer(CLONE_START, tcs0);
+				write_log_buffer(CLONE_END, tcs1);
 			}
 		} else {
 			// If the function is tirggered not by fork after eclone, but parent enclave exists,

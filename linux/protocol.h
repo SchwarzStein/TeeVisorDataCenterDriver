@@ -33,6 +33,8 @@
 #define SVSM_ENCL_ECSYNC 20
 #define SVSM_ENCL_MAX 21
 
+#define SVSM_MEASURE_CLONE_TOTAL 100
+
 #define SVSM_ERR_PROTOCOL 0x80001000
 #define SVSM_ENCLAVE_PROTOCOL_BASE 800
 #define SVSM_ERR_PROTOCOL_ENCLAVE(x) (SVSM_ERR_PROTOCOL + SVSM_ENCLAVE_PROTOCOL_BASE + (x))
@@ -94,6 +96,8 @@ struct sgx_eenter_args
     u64 apic_tdcr;
     u64 apic_tmcct;
     u64 mm;
+    u64 svsm_tsc0;
+    u64 svsm_tsc1;
 } __attribute__((packed));
 
 struct svsm_eaddb_call {
@@ -128,8 +132,9 @@ struct svsm_ecaddinfo_call {
 	struct sgx_cloneinfo_block cloneinfo[];
 }__attribute__((packed));
 
-
+extern void* shared_page;
 extern unsigned int measure_index;
+extern unsigned int enclu_detail;
 
 int snp_sgx_encls(unsigned long index, unsigned long rcx, unsigned long rdx, unsigned long r8);
 int snp_sgx_enclu(struct sgx_eenter_args *param);
@@ -137,4 +142,20 @@ void *get_buffer_page(void);
 void free_buffer_page(void* buffer);
 int alloc_eaddb_buffer(void);
 void release_eaddb_buffer(void);
+
+#define DRIVER_BEFORE_VMPL_SWITCH_INDEX 0UL
+#define DRIVER_AFTER_VMPL_SWITCH_INDEX 1UL
+#define SVSM_START_ENCLU_INDEX 2UL
+#define SVSM_BEFORE_SWITCH_TO_KERNEL_INDEX 3UL
+
+#define DRIVER_BEFORE_VMPL_SWITCH(index) ((DRIVER_BEFORE_VMPL_SWITCH_INDEX << 32) | index)
+#define DRIVER_AFTER_VMPL_SWITCH(index) ((DRIVER_AFTER_VMPL_SWITCH_INDEX << 32) | index)
+#define SVSM_START_ENCLU(index) ((SVSM_START_ENCLU_INDEX << 32) | index)
+#define SVSM_BEFORE_SWITCH_TO_KERNEL(index) ((SVSM_BEFORE_SWITCH_TO_KERNEL_INDEX << 32) | index)
+
+#define CLONE_START (0UL << 32 | SVSM_MEASURE_CLONE_TOTAL)
+#define CLONE_END (1UL << 32 | SVSM_MEASURE_CLONE_TOTAL)
+
+void initialize_shared_page(void);
+void write_log_buffer(u64 val, u64 tcs);
 #endif 

@@ -1423,6 +1423,11 @@ static void emulate_enclu(struct callback_head *work)
 		return;
 	}
 
+	if (enclu_detail) {
+		write_log_buffer(SVSM_START_ENCLU(SVSM_ENCL_ENCLU),param.svsm_tsc0);
+		write_log_buffer(SVSM_BEFORE_SWITCH_TO_KERNEL(SVSM_ENCL_ENCLU),param.svsm_tsc1);
+	}
+
 	regs->ax = param.rax;
 	regs->bx = param.rbx;
 	regs->cx = param.rcx;
@@ -1797,6 +1802,9 @@ static int __init sgx_init(void)
 	if (!detect_svsm())
 		return -ENODEV;
 
+	shared_page = (void *)get_zeroed_page(GFP_KERNEL);
+	if (!shared_page)
+		return -ENOMEM;
 	// if (!sgx_page_cache_init())
 	//	return -EFAULT;
 #ifdef HAVE_MMPUT_ASYNC
@@ -1882,6 +1890,8 @@ static void __exit sgx_exit(void)
 	}
 	rcu_read_unlock();
 
+	if (shared_page)
+		free_page((unsigned long)shared_page);
 	xa_destroy(&cache_block_array);
 	unregister_sgx_die_notifier();
 	release_eaddb_buffer();
