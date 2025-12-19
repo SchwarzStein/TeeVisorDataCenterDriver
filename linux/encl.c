@@ -1327,14 +1327,17 @@ static int sgx_mmu_notifier_invalidate(struct mmu_notifier *mn,
 	//pr_info("mmu_notifier start，range start=0x%lx, end=0x%lx\n", range->start, range->end);
 	encl = encl_mm->encl;
 	mm = encl_mm->mm;
-	mutex_lock(&encl->lock);
+	rcu_read_lock();
 	xa_for_each_range(&encl->sync_array, sync_vfn, sync_entry, start, last) {
 		// pr_info("eunsync: paddr=0x%llx, vaddr=0x%lx， mm=0x%lx\n",
         // sync_entry->paddr, sync_vfn << PAGE_SHIFT, (unsigned long)mm);
-		sgx_encl_eunsync(encl, sync_entry->paddr, sync_vfn << PAGE_SHIFT);
-		xa_erase(&encl->sync_array, sync_vfn);
-		kfree(sync_entry);
+		int ret = sgx_encl_eunsync(encl, sync_entry->paddr, sync_vfn << PAGE_SHIFT);
+		if (!ret) {
+			xa_erase(&encl->sync_array, sync_vfn);
+			kfree(sync_entry);
+		}
 	}
+	rcu_read_unlock();
 	mutex_unlock(&encl->lock);
 	//pr_info("mmu_notifier end\n");
 
