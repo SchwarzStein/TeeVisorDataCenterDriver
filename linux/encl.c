@@ -129,7 +129,11 @@ int sgx_encl_esync(struct sgx_encl *encl, u64 paddr, u64 vaddr, bool read, bool 
 		secinfo->flags |= SGX_SECINFO_X;
 	}
 
+retry:
 	ret = __esync(virt_to_phys(pginfo));
+
+	if (ret == -EAGAIN)
+		goto retry;
 
 	kfree(pginfo);
 	kfree(secinfo);
@@ -163,10 +167,8 @@ retry:
 		goto retry;
 	}
 
-	if (ret) {
-		pr_err("sgx_encl_eunsync failed with error ret:%d", ret);
-	}
-
+	if (ret == -EAGAIN)
+		goto retry;
 	kfree(pginfo);
 	kfree(secinfo);
 
@@ -1338,7 +1340,6 @@ static int sgx_mmu_notifier_invalidate(struct mmu_notifier *mn,
 		}
 	}
 	rcu_read_unlock();
-	mutex_unlock(&encl->lock);
 	//pr_info("mmu_notifier end\n");
 
 	return 0;

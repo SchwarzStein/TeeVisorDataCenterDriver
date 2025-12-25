@@ -1147,11 +1147,37 @@ retry:
 		if (!vaddr_inside_enclave(encl, address))
 		{
 			mutex_lock(&encl->lock);
+
+			ret = get_user_pages(address, 1, 0, &page);
+			if (ret < 1)
+			{
+				pr_err("Cannot get the physical address of a user page!\n");
+				goto sync_fail;
+			}
+
+			pte = vaddr_to_pte(address, mm);
+			if (!pte)
+			{
+				pr_err("Cannot get the pte of a user address!\n");
+				goto sync_fail_page;
+			}
+
+			paddr = pte_pfn(*pte) << PAGE_SHIFT;
+
 			sync_entry = xa_load(&encl->sync_array, PFN_DOWN(address));
 
 			// If the vaddr has already been synced, first try to unsync
 			if (sync_entry)
 			{
+				if (sync_entry->paddr == paddr)
+				{
+					// The page is already synced
+					mutex_unlock(&encl->lock);
+					put_page(page);
+					up_read(&mm->mmap_lock);
+					return;
+				}
+
 				//pr_info("eunsync address: 0x%lx, paddr: 0x%llx", address, sync_entry->paddr);
 				ret = sgx_encl_eunsync(encl, sync_entry->paddr, address);
 				if (ret)
@@ -1164,20 +1190,6 @@ retry:
 				unsynced = true;
 			}
 
-			ret = get_user_pages(address, 1, 0, &page);
-			if (ret < 1)
-			{
-				pr_err("Cannot get the physical address of a user page!\n");
-				goto sync_fail;
-			}
-			pte = vaddr_to_pte(address, mm);
-			if (!pte)
-			{
-				pr_err("Cannot get the pte of a user address!\n");
-				goto sync_fail_page;
-			}
-
-			paddr = pte_pfn(*pte) << PAGE_SHIFT;
 
 			ret = sgx_encl_esync(encl, paddr, address & PAGE_MASK, pte_present(*pte),
 								 pte_write(*pte), false);
