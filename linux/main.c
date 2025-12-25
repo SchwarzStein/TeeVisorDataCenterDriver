@@ -1303,7 +1303,7 @@ static void emulate_enclu(struct callback_head *work)
 	struct pt_regs *regs;
 	struct sgx_eenter_args param = {0};
 	struct sgx_encl_page *entry;
-	u64 tcs_vaddr, tdcr, tmcct;
+	u64 tcs_vaddr;
 	struct sgx_encl *encl;
 	struct task_struct *tsk;
 	struct mm_struct *mm;
@@ -1335,8 +1335,8 @@ static void emulate_enclu(struct callback_head *work)
 		return;
 	}
 
-	rdmsrl(MSR_X2APIC_TDCR, tdcr);
-	rdmsrl(MSR_X2APIC_CURRENT_COUNT, tmcct);
+	//rdmsrl(MSR_X2APIC_TDCR, tdcr);
+	//rdmsrl(MSR_X2APIC_CURRENT_COUNT, tmcct);
 
 	param.tcs_paddr = PFN_PHYS(entry->epc_page->pfn);
 	param.rax = regs->ax;
@@ -1357,8 +1357,8 @@ static void emulate_enclu(struct callback_head *work)
 	param.r15 = regs->r15;
 	param.rip = regs->ip;
 	param.rflags = regs->flags;
-	param.apic_tdcr = tdcr;
-	param.apic_tmcct = tmcct;
+	//param.apic_tdcr = tdcr;
+	//param.apic_tmcct = tmcct;
 	//trace_printk("input param: ");
 	//dump_sgx_args(&param);
 	// TODO: error is hiden here, should return exact error if enclu failed
