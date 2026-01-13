@@ -113,7 +113,7 @@ int sgx_encl_esync(struct sgx_encl *encl, u64 paddr, u64 vaddr, bool read, bool 
 	pginfo->secs = (unsigned long)sgx_get_epc_phys_addr(encl->secs.epc_page);
 	pginfo->addr = vaddr;
 	pginfo->metadata = virt_to_phys(secinfo);
-	pginfo->contents = paddr;
+	pginfo->contents = paddr & PAGE_MASK;
 
 	secinfo->flags = SGX_SECINFO_SYNC;
 
@@ -157,7 +157,7 @@ int sgx_encl_eunsync(struct sgx_encl *encl, u64 paddr, u64 vaddr)
 	pginfo->secs = (unsigned long)sgx_get_epc_phys_addr(encl->secs.epc_page);
 	pginfo->addr = vaddr;
 	pginfo->metadata = virt_to_phys(secinfo);
-	pginfo->contents = paddr;
+	pginfo->contents = paddr & PAGE_MASK;
 retry:
 	ret = __esync(virt_to_phys(pginfo));
 
@@ -1329,17 +1329,17 @@ static int sgx_mmu_notifier_invalidate(struct mmu_notifier *mn,
 	//pr_info("mmu_notifier start，range start=0x%lx, end=0x%lx\n", range->start, range->end);
 	encl = encl_mm->encl;
 	mm = encl_mm->mm;
-	rcu_read_lock();
+	mutex_lock(&encl->sync_lock);
 	xa_for_each_range(&encl->sync_array, sync_vfn, sync_entry, start, last) {
-		// pr_info("eunsync: paddr=0x%llx, vaddr=0x%lx， mm=0x%lx\n",
-        // sync_entry->paddr, sync_vfn << PAGE_SHIFT, (unsigned long)mm);
+		 // pr_info("eunsync: paddr=0x%llx, vaddr=0x%lx， mm=0x%lx\n",
+         // sync_entry->paddr, sync_vfn << PAGE_SHIFT, (unsigned long)mm);
 		int ret = sgx_encl_eunsync(encl, sync_entry->paddr, sync_vfn << PAGE_SHIFT);
 		if (!ret) {
 			xa_erase(&encl->sync_array, sync_vfn);
 			kfree(sync_entry);
 		}
 	}
-	rcu_read_unlock();
+	mutex_unlock(&encl->sync_lock);
 	//pr_info("mmu_notifier end\n");
 
 	return 0;

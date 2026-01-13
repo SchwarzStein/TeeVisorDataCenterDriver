@@ -1552,6 +1552,7 @@ static long sgx_ioc_enclave_clone_bind(struct sgx_encl *encl,
 	xa_init(&child_encl->tcs_array);
 	xa_init(&child_encl->eaug_retry_array);
 	mutex_init(&child_encl->lock);
+	mutex_init(&child_encl->sync_lock);
 	INIT_LIST_HEAD(&child_encl->mm_list);
 	spin_lock_init(&child_encl->mm_lock);
 	ret = init_srcu_struct(&child_encl->srcu);

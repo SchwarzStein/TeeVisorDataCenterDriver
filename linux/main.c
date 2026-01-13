@@ -1132,7 +1132,7 @@ retry:
 	// If VM_FAULT_COMPLETED is set, mmap_lock is released
 	if (fault & VM_FAULT_COMPLETED)
 	{
-		return;
+		down_read(&mm->mmap_lock);
 	}
 
 	if (fault & VM_FAULT_RETRY)
@@ -1146,7 +1146,7 @@ retry:
 		// Try to sync the page if the page is outside the enclave
 		if (!vaddr_inside_enclave(encl, address))
 		{
-			mutex_lock(&encl->lock);
+			mutex_lock(&encl->sync_lock);
 
 			ret = get_user_pages(address, 1, 0, &page);
 			if (ret < 1)
@@ -1162,7 +1162,7 @@ retry:
 				goto sync_fail_page;
 			}
 
-			paddr = pte_pfn(*pte) << PAGE_SHIFT;
+			paddr = (pte_pfn(*pte) << PAGE_SHIFT) | (pte_val(*pte) & 0x3);
 
 			sync_entry = xa_load(&encl->sync_array, PFN_DOWN(address));
 
@@ -1172,7 +1172,7 @@ retry:
 				if (sync_entry->paddr == paddr)
 				{
 					// The page is already synced
-					mutex_unlock(&encl->lock);
+					mutex_unlock(&encl->sync_lock);
 					put_page(page);
 					up_read(&mm->mmap_lock);
 					return;
@@ -1226,7 +1226,7 @@ retry:
 				}
 				kfree(old_sync_entry);
 			}
-			mutex_unlock(&encl->lock);
+			mutex_unlock(&encl->sync_lock);
 			put_page(page);
 		}
 		up_read(&mm->mmap_lock);
@@ -1268,7 +1268,7 @@ sync_fail_page:
 	put_page(page);
 sync_fail:
 	force_sig(SIGKILL);
-	mutex_unlock(&encl->lock);
+	mutex_unlock(&encl->sync_lock);
 	up_read(&mm->mmap_lock);
 	return;
 }

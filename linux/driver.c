@@ -51,6 +51,7 @@ static int sgx_open(struct inode *inode, struct file *file)
 	INIT_RADIX_TREE(&encl->page_tree, GFP_KERNEL);
 #endif
 	mutex_init(&encl->lock);
+	mutex_init(&encl->sync_lock);
 	//INIT_LIST_HEAD(&encl->va_pages);
 	INIT_LIST_HEAD(&encl->mm_list);
 	spin_lock_init(&encl->mm_lock);
