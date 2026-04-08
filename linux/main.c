@@ -1151,7 +1151,9 @@ retry:
 			ret = get_user_pages(address, 1, 0, &page);
 			if (ret < 1)
 			{
-				pr_err("Cannot get the physical address of a user page!\n");
+				if (!fatal_signal_pending(current)) {
+					pr_err("Cannot get the physical address of a user page!\n");
+				}
 				goto sync_fail;
 			}
 
