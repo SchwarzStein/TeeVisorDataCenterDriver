@@ -129,6 +129,7 @@ struct svsm_ecaddinfo_call {
 int snp_sgx_encls(unsigned long index, unsigned long rcx, unsigned long rdx, unsigned long r8);
 int snp_sgx_enclu(struct sgx_eenter_args *param);
 void *get_buffer_page(void);
-void alloc_eaddb_buffer(void);
+void free_buffer_page(void* buffer);
+int alloc_eaddb_buffer(void);
 void release_eaddb_buffer(void);
 #endif 

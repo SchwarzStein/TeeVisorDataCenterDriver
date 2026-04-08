@@ -589,11 +589,7 @@ static int sgx_encl_add_page_block(struct sgx_encl *encl, unsigned long src,
 
 	mutex_unlock(&encl->lock);
 	mmap_read_unlock(current->mm);
-	kfree(tmp_encl_page);
-	kfree(tmp_epc_page);
-	kfree(tmp_src_page);
-
-	return ret;
+	goto free_resources;
 
 err_out_unlock:
 	c++;
@@ -612,12 +608,7 @@ err_out_unlock_prealloc:
 			put_page(tmp_src_page[i]);
 		}
 	}
-
-	kfree(tmp_encl_page);
-	kfree(tmp_epc_page);
-	kfree(tmp_src_page);
-
-	return ret;
+	goto free_resources;
 
 // some pages maybe added, so just release the unhanded and failed part
 err_out_after_eaddb:
@@ -633,7 +624,10 @@ err_out_after_eaddb:
 		sgx_free_epc_page_pre_eadd(tmp_epc_page[i]);
 		kfree(tmp_encl_page[i]);
 	}
+	goto free_resources;
 
+free_resources:
+	free_buffer_page(ec);
 	kfree(tmp_encl_page);
 	kfree(tmp_epc_page);
 	kfree(tmp_src_page);

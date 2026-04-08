@@ -1788,17 +1788,22 @@ static int __init sgx_init(void)
 
 	if (!sgx_page_syncer_init())
 		return -EFAULT;
-
-	ret = sgx_drv_init();
+	
+	ret = alloc_eaddb_buffer();
 	if (ret)
 		goto err_kthread;
 
+	ret = sgx_drv_init();
+	if (ret)
+		goto err_buffer;
+
 	pr_info(DRV_DESCRIPTION " v" DRV_VERSION "\n");
-	alloc_eaddb_buffer();
+
 	register_sgx_die_notifier();
 	return 0;
 
-	
+	err_buffer:
+		release_eaddb_buffer();
 	err_kthread:
 		kthread_stop(kenclaved_tsk);
 	/*

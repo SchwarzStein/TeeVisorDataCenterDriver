@@ -2,9 +2,10 @@
 #include <linux/sched/signal.h>
 #include "protocol.h"
 #include "encls.h"
+#include <linux/mempool.h>
 
 static DEFINE_PER_CPU(struct svsm_ca *, svsm_caa) = NULL;
-static DEFINE_PER_CPU(struct svsm_eaddb_call *, eaddb_buffer) = NULL;
+static mempool_t *teevisor_mempool;
 static DEFINE_PER_CPU(u64, svsm_caa_pa);
 
 static inline u64 sev_snp_rd_caa_msr(void)
@@ -178,34 +179,40 @@ int snp_sgx_enclu(struct sgx_eenter_args *param)
 
 void *get_buffer_page(void)
 {
-	struct svsm_eaddb_call *buffer;
+	struct page *buffer;
+	// Block if there is no free page
+	buffer = mempool_alloc(teevisor_mempool, GFP_KERNEL);
+	if (!buffer) {
+		pr_info("no available buffer now!");
+		return NULL;
+	}
+	void *vaddr = page_address(buffer);
 
-	buffer = this_cpu_read(eaddb_buffer);
-	
-	return buffer;
+	return vaddr;
 }
 
-void alloc_eaddb_buffer(void)
+void free_buffer_page(void* buffer)
+{
+	struct page *page;
+	page = virt_to_page(buffer);
+	mempool_free(page, teevisor_mempool);
+}
+
+int alloc_eaddb_buffer(void)
 {
 	int cpu;
-	struct svsm_eaddb_call *buffer;
 
-	for_each_possible_cpu(cpu) {
-		buffer = kzalloc(PAGE_SIZE, GFP_KERNEL);
-        per_cpu(eaddb_buffer, cpu) = buffer;
-    }
+	cpu = num_online_cpus();
+	teevisor_mempool = mempool_create_page_pool(cpu, 0);
+	if (!teevisor_mempool) {
+		pr_err("Failed to create shared mempool for eaddb buffers!\n");
+		return -ENOMEM;
+	}
+
+	return 0;
 }
 
 void release_eaddb_buffer(void)
 {
-	int cpu;
-	struct svsm_eaddb_call *buffer;
-
-	for_each_possible_cpu(cpu) {
-		buffer = per_cpu(eaddb_buffer, cpu);
-		if (buffer) {
-			kfree(buffer); 
-		}
-        per_cpu(eaddb_buffer, cpu) = NULL;
-    }
+	mempool_destroy(teevisor_mempool);
 }
