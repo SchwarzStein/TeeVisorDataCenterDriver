@@ -80,6 +80,7 @@ struct sgx_encl {
 	struct xarray sync_array;
 	struct xarray tcs_array;
 	struct xarray eaug_retry_array;
+	struct xarray* enclave_array;
 #else
 	struct radix_tree_root page_tree;
 #endif

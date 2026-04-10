@@ -495,16 +495,14 @@ static void sgx_vma_close(struct vm_area_struct* vma)
 		return;
 
 	//pr_info("vma_close\n");
-	encl = xa_load(vma->vm_private_data, (unsigned long)vma->vm_mm);
+	encl = xa_load(enclave_array, (unsigned long)vma->vm_mm);
 	
 	if (!encl) {
 		return;
 	}
 	
 	//pr_info("before decrement refcount=%d\n", kref_read(&encl->refcount));
-	if (kref_put(&encl->refcount, sgx_encl_release)) {
-		xa_erase(vma->vm_private_data, (unsigned long)vma->vm_mm); 
-	}
+	kref_put(&encl->refcount, sgx_encl_release);
 	return;
 }
 
@@ -798,7 +796,8 @@ static void sgx_vma_open(struct vm_area_struct *vma)
 			// Register the sync page after child is cloned
 			if (encl) {
 				//insert it into the enclave list
-				pr_info("clone parent mm: 0x%lx, child mm: 0x%lx\n",(unsigned long)current->mm, (unsigned long)vma->vm_mm);
+				// pr_info("clone parent mm: 0x%lx, child mm: 0x%lx\n",(unsigned long)current->mm, (unsigned long)vma->vm_mm);
+				encl->enclave_array = enclave_array;
 				ret = xa_insert(enclave_array, (unsigned long)vma->vm_mm,encl, GFP_KERNEL);
 				if (ret) {
 					goto encl_failed_after_clone;
@@ -842,19 +841,22 @@ static void sgx_vma_open(struct vm_area_struct *vma)
 				goto encl_open_failed;
 			}
 		} else {
-			// If the function is tirggered not by fork after eclone, just return;
-			goto encl_open_failed;
+			// If the function is tirggered not by fork after eclone, but parent enclave exists,
+			// falls back to the normal clone flow.
+			if (parent_encl) {
+				encl = parent_encl;
+				// pr_info("fall back parent mm: 0x%lx, child mm: 0x%lx\n",(unsigned long)current->mm, (unsigned long)vma->vm_mm);
+				ret = xa_insert(enclave_array, (unsigned long)vma->vm_mm,encl, GFP_KERNEL);
+				if (ret) {
+					pr_err("cannot insert into enclave array\n");
+					goto encl_open_failed;
+				}
+			}
+			else {
+				pr_err("vma_open without parent enclave!\n");
+				goto encl_open_failed;
+			}
 		}
-	}
-
-	// If register the encl failed, release the encl here, it will not released in sgx_vma_close
-	if (sgx_encl_mm_add(encl, vma->vm_mm)) {
-		if (kref_put(&encl->refcount, sgx_encl_release)) {
-			xa_erase(enclave_array, (unsigned long)vma->vm_mm);
-		} else {
-			pr_err("sgx_encl_mm_add failed when encl->refcount > 1!\n");
-		}
-		goto encl_open_failed;
 	}
 		
 		
@@ -865,6 +867,11 @@ static void sgx_vma_open(struct vm_area_struct *vma)
 		kref_get(&encl->refcount);
 	}
 
+	// If register the encl failed, release the encl here, it will not released in sgx_vma_close
+	if (sgx_encl_mm_add(encl, vma->vm_mm)) {
+		kref_put(&encl->refcount, sgx_encl_release);
+		goto encl_open_failed;
+	}
 	//pr_info("vma_open refcount=%d\n", kref_read(&encl->refcount));
 
 	return;
@@ -1153,6 +1160,7 @@ void sgx_encl_release(struct kref *ref)
 			break;
 
 		synchronize_srcu(&encl->srcu);
+		xa_erase(encl->enclave_array, (unsigned long)encl_mm->mm);
 		mmu_notifier_unregister(&encl_mm->mmu_notifier, encl_mm->mm);
 		kfree(encl_mm);
 	}
@@ -1272,36 +1280,38 @@ static void sgx_encl_mm_release_deferred(struct rcu_head *rcu)
 static void sgx_mmu_notifier_release(struct mmu_notifier *mn,
 				     struct mm_struct *mm)
 {
-	struct sgx_encl_mm *encl_mm = container_of(mn, struct sgx_encl_mm, mmu_notifier);
-	struct sgx_encl_mm *tmp = NULL;
+	// The callback function will remove the item in mm_list which is required in encl_release
+	// just skip this part.
+// 	struct sgx_encl_mm *encl_mm = container_of(mn, struct sgx_encl_mm, mmu_notifier);
+// 	struct sgx_encl_mm *tmp = NULL;
 
-	/*
-	 * The enclave itself can remove encl_mm.  Note, objects can't be moved
-	 * off an RCU protected list, but deletion is ok.
-	 */
-	spin_lock(&encl_mm->encl->mm_lock);
-	list_for_each_entry(tmp, &encl_mm->encl->mm_list, list) {
-		if (tmp == encl_mm) {
-			list_del_rcu(&encl_mm->list);
-			break;
-		}
-	}
-	spin_unlock(&encl_mm->encl->mm_lock);
+// 	/*
+// 	 * The enclave itself can remove encl_mm.  Note, objects can't be moved
+// 	 * off an RCU protected list, but deletion is ok.
+// 	 */
+// 	spin_lock(&encl_mm->encl->mm_lock);
+// 	list_for_each_entry(tmp, &encl_mm->encl->mm_list, list) {
+// 		if (tmp == encl_mm) {
+// 			list_del_rcu(&encl_mm->list);
+// 			break;
+// 		}
+// 	}
+// 	spin_unlock(&encl_mm->encl->mm_lock);
 
-	if (tmp == encl_mm) {
-		synchronize_srcu(&encl_mm->encl->srcu);
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0))
-		mmu_notifier_put(mn);
-#else
-            /*
-            * Delay freeing encl_mm until after mmu_notifier synchronizes
-            * its SRCU to ensure encl_mm cannot be dereferenced.
-            */
-            mmu_notifier_unregister_no_release(mn, mm);
-            mmu_notifier_call_srcu(&encl_mm->rcu,
-                               &sgx_encl_mm_release_deferred);
-#endif
-	}
+// 	if (tmp == encl_mm) {
+// 		synchronize_srcu(&encl_mm->encl->srcu);
+// #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0))
+// 		mmu_notifier_put(mn);
+// #else
+//             /*
+//             * Delay freeing encl_mm until after mmu_notifier synchronizes
+//             * its SRCU to ensure encl_mm cannot be dereferenced.
+//             */
+//             mmu_notifier_unregister_no_release(mn, mm);
+//             mmu_notifier_call_srcu(&encl_mm->rcu,
+//                                &sgx_encl_mm_release_deferred);
+// #endif
+// 	}
 }
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0))

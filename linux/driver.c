@@ -60,6 +60,7 @@ static int sgx_open(struct inode *inode, struct file *file)
 	if (ret) 
 		goto free_encl;
 
+	encl->enclave_array = enclave_array;
 	ret = xa_insert(enclave_array, (unsigned long)current->mm, encl, GFP_KERNEL);
 	if (ret) 
 		goto free_encl;
@@ -87,6 +88,8 @@ static int sgx_release(struct inode *inode, struct file *file)
 		kfree(file->private_data);
 	} else {
 		xa_for_each(file->private_data, index, encl) {
+			// If the device is opened and closed directly without mmap,
+			// the previously created enclave instance need to be released
 			if (kref_put(&encl->refcount, sgx_encl_release)) {
 			} else
 			{
