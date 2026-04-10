@@ -1327,16 +1327,17 @@ static void emulate_enclu(struct callback_head *work)
 	mm = tsk->mm;
 	regs = task_pt_regs(current);
 	tcs_vaddr = regs->bx;
-	//pr_info("tcs_vaddr :%llx", tcs_vaddr);
 	encl = get_encl_from_vaddr(tcs_vaddr);
 	if (!encl)
 	{
 		pr_err("emulate_enclu get enclave failed");
 		do_trap(X86_TRAP_PF, SIGSEGV, regs, 0, 0, (void *)regs->bx);
+		kfree(work);
 		return;
 	}
 
 	if (test_bit(SGX_ENCL_CLONE, &encl->flags)) {
+		kfree(work);
 		cond_resched();
 		return;
 	}
@@ -1346,6 +1347,7 @@ static void emulate_enclu(struct callback_head *work)
 	{
 		pr_err("emulate_enclu get tcs_array failed");
 		do_trap(X86_TRAP_PF, SIGSEGV, regs, 0, 0, (void *)regs->bx);
+		kfree(work);
 		return;
 	}
 

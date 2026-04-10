@@ -174,8 +174,12 @@ static inline int sgx_encl_find(struct mm_struct *mm, unsigned long addr,
 	struct vm_area_struct *result;
 	down_read(&mm->mmap_lock);  
 	result = find_vma(mm, addr);
-	if (!result || result->vm_ops != &sgx_vm_ops || addr < result->vm_start)
+	if (!result || result->vm_ops != &sgx_vm_ops || addr < result->vm_start) {
+		pr_info("invalid find_vma");
+		up_read(&mm->mmap_lock);
 		return -EINVAL;
+	}
+
 	up_read(&mm->mmap_lock);
 	*vma = result;
 
