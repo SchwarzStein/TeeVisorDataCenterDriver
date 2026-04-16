@@ -1095,6 +1095,7 @@ static void handle_pf(struct pt_regs *regs,
 	struct task_struct *tsk;
 	struct mm_struct *mm;
 	struct sgx_encl_sync_page *sync_entry;
+	struct sgx_mm_sync_array *sync_array_entry;
 	vm_fault_t fault;
 	unsigned int flags = FAULT_FLAG_DEFAULT;
 	struct page *page = NULL;
@@ -1166,7 +1167,27 @@ retry:
 
 			paddr = (pte_pfn(*pte) << PAGE_SHIFT) | (pte_val(*pte) & 0x3);
 
-			sync_entry = xa_load(&encl->sync_array, PFN_DOWN(address));
+			sync_array_entry = xa_load(&encl->mm_sync_array, (unsigned long)mm);
+
+			if (!sync_array_entry) {
+				sync_array_entry = kmalloc(sizeof(*sync_array_entry), GFP_KERNEL);
+				if (!sync_array_entry) {
+					pr_err("No enough memory for new sync_array");
+					goto sync_fail_page;
+				}
+				xa_init(&sync_array_entry->array);
+				// We have already acquired the sync lock here, so do not need to consider
+				// thread contention here
+				ret = xa_insert(&encl->mm_sync_array, (unsigned long)mm, sync_array_entry, GFP_KERNEL);
+				if (ret) {
+					pr_err("No enough memory for inserting sync_array");
+					xa_destroy(&sync_array_entry->array);
+					kfree(sync_array_entry);
+					goto sync_fail_page;
+				}
+			}
+
+			sync_entry = xa_load(&sync_array_entry->array, PFN_DOWN(address));
 
 			// If the vaddr has already been synced, first try to unsync
 			if (sync_entry)
@@ -1180,13 +1201,14 @@ retry:
 					return;
 				}
 
-				//pr_info("eunsync address: 0x%lx, paddr: 0x%llx", address, sync_entry->paddr);
-				ret = sgx_encl_eunsync(encl, sync_entry->paddr, address);
+
+				// pr_info("eunsync address: 0x%lx, paddr: 0x%llx", address, sync_entry->paddr);
+				ret = sgx_encl_eunsync(encl, sync_entry->paddr, address, (u64)mm);
 				if (ret)
 				{
 					pr_err("eunsync has an error with vaddr:0x%lx, paddr:0x%llx\n",
 						   address, sync_entry->paddr);
-					goto sync_fail;
+					goto sync_fail_page;
 				}
 				encl->sync_page_cnt--;
 				unsynced = true;
@@ -1194,8 +1216,8 @@ retry:
 
 
 			ret = sgx_encl_esync(encl, paddr, address & PAGE_MASK, pte_present(*pte),
-								 pte_write(*pte), false);
-			//pr_info("esync address: 0x%lx, paddr: 0x%llx, pte: 0x%lx", address, paddr, pte->pte);
+								 pte_write(*pte), false, (u64)mm);
+			// pr_info("esync address: 0x%lx, paddr: 0x%llx, pte: 0x%lx, mm: 0x%lx\n", address, paddr, pte->pte, (unsigned long)mm);
 			if (ret)
 			{
 				pr_err("esync has an error with vaddr:0x%lx, paddr:0x%llx, rwx: %d%d%d\n",
@@ -1212,7 +1234,7 @@ retry:
 
 			encl->sync_page_cnt++;
 			sync_entry->paddr = paddr;
-			old_sync_entry = xa_store(&encl->sync_array, PFN_DOWN(address), sync_entry, GFP_KERNEL);
+			old_sync_entry = xa_store(&sync_array_entry->array, PFN_DOWN(address), sync_entry, GFP_KERNEL);
 
 			if (xa_is_err(old_sync_entry)) {
 				pr_err("esync OOM");
@@ -1388,6 +1410,7 @@ static void emulate_enclu(struct callback_head *work)
 	param.r15 = regs->r15;
 	param.rip = regs->ip;
 	param.rflags = regs->flags;
+	param.mm = (u64)mm;
 	//param.apic_tdcr = tdcr;
 	//param.apic_tmcct = tmcct;
 	//trace_printk("input param: ");

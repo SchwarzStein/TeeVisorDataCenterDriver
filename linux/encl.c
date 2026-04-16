@@ -97,7 +97,7 @@ static struct sgx_epc_page *sgx_encl_eldu(struct sgx_encl_page *encl_page,
 	return epc_page;
 }
 */
-int sgx_encl_esync(struct sgx_encl *encl, u64 paddr, u64 vaddr, bool read, bool write, bool execute)
+int sgx_encl_esync(struct sgx_encl *encl, u64 paddr, u64 vaddr, bool read, bool write, bool execute, u64 mm)
 {
 	struct sgx_pageinfo *pginfo;
 	struct sgx_secinfo *secinfo;
@@ -130,18 +130,21 @@ int sgx_encl_esync(struct sgx_encl *encl, u64 paddr, u64 vaddr, bool read, bool 
 	}
 
 retry:
-	ret = __esync(virt_to_phys(pginfo));
+	ret = __esync(virt_to_phys(pginfo), mm);
 
 	if (ret == -EAGAIN)
 		goto retry;
 
+	if (ret) {
+		pr_err("esync ret is 0x%x", ret);
+	}
 	kfree(pginfo);
 	kfree(secinfo);
 
 	return ret ? -EIO : 0;
 }
 
-int sgx_encl_eunsync(struct sgx_encl *encl, u64 paddr, u64 vaddr)
+int sgx_encl_eunsync(struct sgx_encl *encl, u64 paddr, u64 vaddr, u64 mm)
 {
 	struct sgx_pageinfo *pginfo;
 	struct sgx_secinfo *secinfo;
@@ -159,7 +162,7 @@ int sgx_encl_eunsync(struct sgx_encl *encl, u64 paddr, u64 vaddr)
 	pginfo->metadata = virt_to_phys(secinfo);
 	pginfo->contents = paddr & PAGE_MASK;
 retry:
-	ret = __esync(virt_to_phys(pginfo));
+	ret = __esync(virt_to_phys(pginfo), mm);
 
 	// Cloned enclave share one epcm with parent, in epcm contention cases, retry
 	if(ret == (ENCLS_FAULT_FLAG | X86_TRAP_GP) && encl->attributes & SGX_ATTR_CLONE) {
@@ -172,6 +175,9 @@ retry:
 	kfree(pginfo);
 	kfree(secinfo);
 
+	if (ret) {
+		pr_err("sgx_encl_eunsync failed with ret %x, paddr %llx, vaddr: %llx, mm: %llx",ret, paddr, vaddr, mm);
+	}
 	return ret ? -EIO : 0;
 }
 
@@ -513,7 +519,6 @@ static struct sgx_encl *clone_enclave(struct sgx_encl *parent_encl)
 	struct svsm_ecaddinfo_call *ea;
 	struct sgx_encl *child_encl;
 	struct sgx_encl_page *entry, *encl_page, *child_encl_page;
-	struct sgx_encl_sync_page *sync_entry, *child_sync_entry;
 	unsigned long index;
 	int ret;
 	bool loop = false;
@@ -557,19 +562,6 @@ static struct sgx_encl *clone_enclave(struct sgx_encl *parent_encl)
 				goto clone_abort;
 			}
 			atomic_long_inc_return_release(&entry->epc_page->counter);
-		}
-	}
-
-	xa_for_each(&parent_encl->sync_array, index, sync_entry) {
-		child_sync_entry =  kzalloc(sizeof(struct sgx_encl_sync_page), GFP_KERNEL);
-		if (!child_sync_entry) {
-			goto clone_abort;
-		}
-		child_sync_entry->paddr = sync_entry->paddr;
-		ret = xa_insert(&child_encl->sync_array, index, child_sync_entry, GFP_KERNEL);
-		if (ret) {
-			kfree(child_sync_entry);
-			goto clone_abort;
 		}
 	}
 
@@ -729,9 +721,6 @@ end_elcone:
 	return child_encl;
 
 clone_abort:
-	xa_for_each(&child_encl->sync_array, index, sync_entry) {
-		kfree(sync_entry);
-	}
 
 	long epc_page_counter;
 
@@ -750,7 +739,7 @@ clone_abort:
 	}
 
 	xa_destroy(&child_encl->page_array);
-	xa_destroy(&child_encl->sync_array);
+	xa_destroy(&child_encl->mm_sync_array);
 	mutex_unlock(&child_encl->lock);
 	mutex_unlock(&parent_encl->lock);
 	sgx_enclave_clone_abort(parent_encl);
@@ -1128,13 +1117,14 @@ void sgx_encl_release(struct kref *ref)
 	//struct sgx_va_page *va_page;
 	struct sgx_encl_page *entry;
 	struct sgx_encl_sync_page *sync_entry;
+	struct sgx_mm_sync_array *mm_sync_array;
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 20, 0))
 	struct radix_tree_iter iter;
 	void **slot;
 #else
 	unsigned long index;
 #endif
-	unsigned long sync_vfn;
+	unsigned long sync_vfn, mm_addr;
 	struct sgx_encl_mm *encl_mm;
 	pr_info("enclave start releasing\n");
 	/*
@@ -1220,15 +1210,19 @@ void sgx_encl_release(struct kref *ref)
 	xa_destroy(&encl->page_array);
 #endif
 
-	xa_for_each(&encl->sync_array, sync_vfn, sync_entry) {
-		if (sgx_encl_eunsync(encl, sync_entry->paddr, sync_vfn << PAGE_SHIFT))
-			pr_err("eunsync in sgx release failed with vaddr:0x%lx, paddr:0x%llx\n"
-			, sync_vfn << PAGE_SHIFT, sync_entry->paddr);
+	xa_for_each(&encl->mm_sync_array, mm_addr, mm_sync_array) {
 
-		encl->sync_page_cnt--;
-		kfree(sync_entry);
+		xa_for_each(&mm_sync_array->array, sync_vfn, sync_entry) {
+			if (sgx_encl_eunsync(encl, sync_entry->paddr, sync_vfn << PAGE_SHIFT, mm_addr))
+				pr_err("eunsync in sgx release failed with vaddr:0x%lx, paddr:0x%llx\n"
+				, sync_vfn << PAGE_SHIFT, sync_entry->paddr);
+			encl->sync_page_cnt--;
+			kfree(sync_entry);
+		}
+		xa_destroy(&mm_sync_array->array);
+		kfree(mm_sync_array);
 	}
-	xa_destroy(&encl->sync_array);
+	xa_destroy(&encl->mm_sync_array);
 	xa_destroy(&encl->tcs_array);
 
 	if (encl->secs_child_cnt) {
@@ -1329,27 +1323,34 @@ static int sgx_mmu_notifier_invalidate(struct mmu_notifier *mn,
 {
 	struct sgx_encl* encl;
 	struct mm_struct *mm;
-	unsigned long sync_vfn;
+	unsigned long sync_vfn, mm_addr;
 	unsigned long start = PFN_DOWN(range->start);
 	// range is [start, end) but in the xa_for_each_range is [start, last]
 	unsigned long last = (range->end - 1) >> PAGE_SHIFT;
 
+	struct sgx_mm_sync_array *sync_array_entry;
 	struct sgx_encl_sync_page *sync_entry;
 	struct sgx_encl_mm *encl_mm = container_of(mn, struct sgx_encl_mm, mmu_notifier);
 
 	//pr_info("mmu_notifier start，range start=0x%lx, end=0x%lx\n", range->start, range->end);
 	encl = encl_mm->encl;
 	mm = encl_mm->mm;
+	mm_addr = (unsigned long)mm;
 	mutex_lock(&encl->sync_lock);
-	xa_for_each_range(&encl->sync_array, sync_vfn, sync_entry, start, last) {
-		 // pr_info("eunsync: paddr=0x%llx, vaddr=0x%lx， mm=0x%lx\n",
-         // sync_entry->paddr, sync_vfn << PAGE_SHIFT, (unsigned long)mm);
-		int ret = sgx_encl_eunsync(encl, sync_entry->paddr, sync_vfn << PAGE_SHIFT);
-		if (!ret) {
-			xa_erase(&encl->sync_array, sync_vfn);
-			kfree(sync_entry);
+
+	sync_array_entry = xa_load(&encl->mm_sync_array, mm_addr);
+	if (sync_array_entry) {
+		xa_for_each_range(&sync_array_entry->array, sync_vfn, sync_entry, start, last) {
+			// pr_info("mmu_notifier eunsync: paddr=0x%llx, vaddr=0x%lx， mm=0x%lx\n",
+			// sync_entry->paddr, sync_vfn << PAGE_SHIFT, (unsigned long)mm);
+			int ret = sgx_encl_eunsync(encl, sync_entry->paddr, sync_vfn << PAGE_SHIFT, mm_addr);
+			if (!ret) {
+				xa_erase(&sync_array_entry->array, sync_vfn);
+				kfree(sync_entry);
+			}
 		}
 	}
+
 	mutex_unlock(&encl->sync_lock);
 	//pr_info("mmu_notifier end\n");
 

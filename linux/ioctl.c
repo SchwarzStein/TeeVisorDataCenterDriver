@@ -1542,7 +1542,7 @@ static long sgx_ioc_enclave_clone_bind(struct sgx_encl *encl,
 
 	kref_init(&child_encl->refcount);
 	xa_init(&child_encl->page_array);
-	xa_init(&child_encl->sync_array);
+	xa_init(&child_encl->mm_sync_array);
 	xa_init(&child_encl->tcs_array);
 	xa_init(&child_encl->eaug_retry_array);
 	mutex_init(&child_encl->lock);

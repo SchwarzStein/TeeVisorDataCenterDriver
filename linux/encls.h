@@ -193,9 +193,9 @@ static inline int __ecreate(u64 pginfo, u64 secs)
 	return snp_sgx_encls(SVSM_ENCL_ECREATE, pginfo, secs, 0);
 }
 
-static inline int __esync(u64 pginfo)
+static inline int __esync(u64 pginfo, u64 mm)
 {
-	return snp_sgx_encls(SVSM_ENCL_ESYNC, pginfo, 0, 0);
+	return snp_sgx_encls(SVSM_ENCL_ESYNC, pginfo, mm, 0);
 }
 
 static inline int __ecsync(u64 secs, u64 sync_page)

@@ -39,6 +39,10 @@ struct sgx_encl_page {
 	struct sgx_va_page *va_page;
 };
 
+struct sgx_mm_sync_array {
+	struct xarray array;
+};
+
 struct sgx_encl_sync_page {
 	u64 paddr;
 };
@@ -77,7 +81,7 @@ struct sgx_encl {
 	struct mutex sync_lock;
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0))
 	struct xarray page_array;
-	struct xarray sync_array;
+	struct xarray mm_sync_array;
 	struct xarray tcs_array;
 	struct xarray eaug_retry_array;
 	struct xarray* enclave_array;
@@ -214,8 +218,8 @@ int sgx_encl_mm_add(struct sgx_encl *encl, struct mm_struct *mm);
 //int sgx_encl_test_and_clear_young(struct mm_struct *mm,
 //				  struct sgx_encl_page *page);
 int sgx_encl_esync(struct sgx_encl *encl, u64 paddr, u64 vaddr, 
-	bool read, bool write, bool execute);
-int sgx_encl_eunsync(struct sgx_encl *encl, u64 paddr, u64 vaddr);
+	bool read, bool write, bool execute, u64 mm);
+int sgx_encl_eunsync(struct sgx_encl *encl, u64 paddr, u64 vaddr, u64 mm);
 struct sgx_encl_page *sgx_encl_load_page(struct sgx_encl *encl,
 						unsigned long addr);
 void sync_page_once(struct enclave_clone_sync_entry* sync_entry, bool terminate);

@@ -92,6 +92,7 @@ struct sgx_eenter_args
 	u64 error_code;
     u64 apic_tdcr;
     u64 apic_tmcct;
+    u64 mm;
 } __attribute__((packed));
 
 struct svsm_eaddb_call {
