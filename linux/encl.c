@@ -1121,35 +1121,6 @@ void sgx_encl_release(struct kref *ref)
 	unsigned long sync_vfn, mm_addr;
 	struct sgx_encl_mm *encl_mm;
 	pr_info("enclave start releasing\n");
-	/*
-	 * Drain the remaining mm_list entries. At this point the list contains
-	 * entries for processes, which have closed the enclave file but have
-	 * not exited yet. The processes, which have exited, are gone from the
-	 * list by sgx_mmu_notifier_release().
-	 */
-	for ( ; ; )  {
-		spin_lock(&encl->mm_lock);
-
-		if (list_empty(&encl->mm_list)) {
-			encl_mm = NULL;
-		} else {
-			encl_mm = list_first_entry(&encl->mm_list,
-						   struct sgx_encl_mm, list);
-			list_del_rcu(&encl_mm->list);
-		}
-
-		spin_unlock(&encl->mm_lock);
-
-		/* The enclave is no longer mapped by any mm. */
-		if (!encl_mm)
-			break;
-
-		synchronize_srcu(&encl->srcu);
-		xa_erase(encl->enclave_array, (unsigned long)encl_mm->mm);
-		mmu_notifier_unregister(&encl_mm->mmu_notifier, encl_mm->mm);
-		kfree(encl_mm);
-	}
-
 
 	if (test_bit(SGX_ENCL_CLONE, &encl->flags)) {
 		sgx_enclave_clone_abort(encl);
@@ -1229,6 +1200,35 @@ void sgx_encl_release(struct kref *ref)
 	}
 
 	/*
+	 * Drain the remaining mm_list entries. At this point the list contains
+	 * entries for processes, which have closed the enclave file but have
+	 * not exited yet. The processes, which have exited, are gone from the
+	 * list by sgx_mmu_notifier_release().
+	 */
+	for ( ; ; )  {
+		spin_lock(&encl->mm_lock);
+
+		if (list_empty(&encl->mm_list)) {
+			encl_mm = NULL;
+		} else {
+			encl_mm = list_first_entry(&encl->mm_list,
+						   struct sgx_encl_mm, list);
+			list_del_rcu(&encl_mm->list);
+		}
+
+		spin_unlock(&encl->mm_lock);
+
+		/* The enclave is no longer mapped by any mm. */
+		if (!encl_mm)
+			break;
+
+		synchronize_srcu(&encl->srcu);
+		xa_erase(encl->enclave_array, (unsigned long)encl_mm->mm);
+		mmu_notifier_unregister(&encl_mm->mmu_notifier, encl_mm->mm);
+		kfree(encl_mm);
+	}
+
+	/*
 	while (!list_empty(&encl->va_pages)) {
 		va_page = list_first_entry(&encl->va_pages, struct sgx_va_page,
 					   list);
@@ -1248,6 +1248,7 @@ void sgx_encl_release(struct kref *ref)
 	/* Detect EPC page leak's. */
 	WARN_ON_ONCE(encl->secs_child_cnt);
 	WARN_ON_ONCE(encl->secs.epc_page);
+
 
 	pr_info("enclave released\n");
 	kfree(encl);
