@@ -1230,11 +1230,26 @@ retry:
 			}
 			mutex_unlock(&encl->sync_lock);
 			put_page(page);
+		} else {
+			// If a pf happened inside an enclave, can be three possible situations:
+			// 1. PF in EDMM and triggers EAUG, need to set VM_FAULT_SIGBUS to invoke the signal handler/
+			// 2. Not accepted page, the same as 1.
+			// 3. Accepted page with permission error, need to set VM_FAULT_SIGSEGV
+			// The difference between (1 , 2) and 3 here is the present bit should be set if the page is accepted.
+			
+			if (error_code & X86_PF_PROT) {
+				fault |= VM_FAULT_SIGSEGV;
+			} else {
+				fault |= VM_FAULT_SIGBUS;
+			}
+			goto handle_vm_fault;
 		}
 		up_read(&mm->mmap_lock);
 		return;
 	}
 
+
+handle_vm_fault:
 	up_read(&mm->mmap_lock);
 	// Here just kill the current task if OOM.
 	if (fault & VM_FAULT_OOM)

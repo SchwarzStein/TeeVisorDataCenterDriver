@@ -423,12 +423,13 @@ static int sgx_vma_fault(struct vm_fault *vmf)
 	/*
 	 * If the page is not added, try to call eaug.
 	 * Otherwise the page is tried to visit either from outside or
-	 * with wrong permission, just return an error.
+	 * with wrong permission, just return an VM_FAULT_NOPAGE, and in handle_pf
+	 * set the signal according to the present bit which cannot be checked here.
 	 */
 	if (!xa_load(&encl->page_array, PFN_DOWN(addr)))
 		return sgx_encl_eaug_page(vma, encl, addr);
 	else 
-		ret = VM_FAULT_SIGBUS;
+		ret = VM_FAULT_NOPAGE;	
 	//mutex_unlock(&encl->lock);
 	/*
 
