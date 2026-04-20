@@ -849,13 +849,7 @@ static void sgx_vma_open(struct vm_area_struct *vma)
 		}
 	}
 		
-		
-
-	// To keep the refcount correctly, do not increment the counter first time after clone
-	// counter is initialized set to one during clone
-	if (test_and_set_bit(SGX_ENCL_MMAP, &encl->flags)) {
 		kref_get(&encl->refcount);
-	}
 
 	// If register the encl failed, release the encl here, it will not released in sgx_vma_close
 	if (sgx_encl_mm_add(encl, vma->vm_mm)) {

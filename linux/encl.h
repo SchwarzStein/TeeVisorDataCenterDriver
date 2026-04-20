@@ -55,7 +55,6 @@ enum sgx_encl_flags {
 	SGX_ENCL_RUNTIME	= BIT(4),
 	SGX_ENCL_CLONE = BIT(5),	// Current Enclave is in clone state
 	SGX_ENCL_CLONE_FAIL = BIT(6), // Indicate the recent clone failed or not
-	SGX_ENCL_MMAP = BIT(7),		// Set when mmap/clone at the first time for the enclave
 };
 
 struct sgx_encl_mm {

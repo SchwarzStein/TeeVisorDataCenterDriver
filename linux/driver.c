@@ -137,10 +137,7 @@ static int sgx_mmap(struct file *file, struct vm_area_struct *vma)
 	vm_flags_set(vma, VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP | VM_IO);
 	vma->vm_private_data = file->private_data;
 
-	// The first mmap should not increment the counter
-	if (test_and_set_bit(SGX_ENCL_MMAP, &encl->flags)) {
-		kref_get(&encl->refcount);
-	}
+	kref_get(&encl->refcount);
 	return 0;
 }
 
