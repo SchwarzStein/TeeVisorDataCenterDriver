@@ -1174,7 +1174,7 @@ void sgx_encl_release(struct kref *ref)
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0))
 	xa_destroy(&encl->page_array);
 #endif
-
+	mutex_lock(&encl->sync_lock);
 	xa_for_each(&encl->mm_sync_array, mm_addr, mm_sync_array) {
 
 		xa_for_each(&mm_sync_array->array, sync_vfn, sync_entry) {
@@ -1188,6 +1188,8 @@ void sgx_encl_release(struct kref *ref)
 		kfree(mm_sync_array);
 	}
 	xa_destroy(&encl->mm_sync_array);
+	mutex_unlock(&encl->sync_lock);
+
 	xa_destroy(&encl->tcs_array);
 
 	if (encl->secs_child_cnt) {
