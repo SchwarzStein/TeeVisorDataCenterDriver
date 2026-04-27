@@ -413,9 +413,14 @@ static int sgx_vma_fault(struct vm_fault *vmf)
 #endif
 
 	if (unlikely(!enclave_array))
+	{
+		pr_err("No enclave found in vma fault handler!");
 		return VM_FAULT_SIGBUS;
+	}
+	
+	// pr_info("xa_load enclave_array, mm: 0x%lx  start\n", (unsigned long)vma->vm_mm);
 	encl = xa_load(enclave_array, (unsigned long)vma->vm_mm);
-
+	// pr_info("xa_load enclave_array, mm: 0x%lx  end, get encl: %lx\n", (unsigned long)vma->vm_mm, (unsigned long)encl);
 	/*
 	 * It's very unlikely but possible that allocating memory for the
 	 * mm_list entry of a forked process failed in sgx_vma_open(). When
@@ -432,10 +437,25 @@ static int sgx_vma_fault(struct vm_fault *vmf)
 	 * with wrong permission, just return an VM_FAULT_NOPAGE, and in handle_pf
 	 * set the signal according to the present bit which cannot be checked here.
 	 */
-	if (!xa_load(&encl->page_array, PFN_DOWN(addr)))
-		return sgx_encl_eaug_page(vma, encl, addr);
-	else 
-		ret = VM_FAULT_NOPAGE;	
+    struct sgx_encl_page *entry;
+	// pr_info("xa_load page_array start encl:%lx\n", (unsigned long)encl);
+    entry = xa_load(&encl->page_array, PFN_DOWN(addr));
+	if (!entry) {
+		// pr_info("eaug PFN_DOWN(addr):0x%lx start", PFN_DOWN(addr));
+		ret = sgx_encl_eaug_page(vma, encl, addr);
+		// pr_info("eaug PFN_DOWN(addr):0x%lx end", PFN_DOWN(addr));
+	} else if (!(entry->desc & PROT_READ) 
+            || (!(entry->desc & PROT_WRITE) && (vmf->flags & FAULT_FLAG_WRITE))
+            || (!(entry->desc & PROT_EXEC) && (vmf->flags & FAULT_FLAG_INSTRUCTION))) {
+        // We did map the pagetable in the linux pte, so parsing the permission here to
+        // decide the signal type
+        ret = VM_FAULT_SIGSEGV;
+    }
+	else {
+        ret = VM_FAULT_SIGBUS;
+    }
+		
+	// pr_info("xa_load page_array end encl:%lx\n", (unsigned long)encl);
 	//mutex_unlock(&encl->lock);
 	/*
 
@@ -508,8 +528,6 @@ static void sgx_vma_close(struct vm_area_struct* vma)
 		return;
 	}
 	
-	//pr_info("before decrement refcount=%d\n", kref_read(&encl->refcount));
-	kref_put(&encl->refcount, sgx_encl_release);
 	return;
 }
 
@@ -848,12 +866,11 @@ static void sgx_vma_open(struct vm_area_struct *vma)
 			}
 		}
 	}
-		
-		kref_get(&encl->refcount);
 
 	// If register the encl failed, release the encl here, it will not released in sgx_vma_close
 	if (sgx_encl_mm_add(encl, vma->vm_mm)) {
-		kref_put(&encl->refcount, sgx_encl_release);
+		if (clone)
+			kref_put(&encl->refcount, sgx_encl_release);
 		goto encl_open_failed;
 	}
 	//pr_info("vma_open refcount=%d\n", kref_read(&encl->refcount));
@@ -1110,16 +1127,14 @@ void sgx_encl_release(struct kref *ref)
 	struct sgx_encl *encl = container_of(ref, struct sgx_encl, refcount);
 	//struct sgx_va_page *va_page;
 	struct sgx_encl_page *entry;
-	struct sgx_encl_sync_page *sync_entry;
-	struct sgx_mm_sync_array *mm_sync_array;
+	struct sgx_mm_sync_array *sync_array_entry;
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 20, 0))
 	struct radix_tree_iter iter;
 	void **slot;
 #else
 	unsigned long index;
 #endif
-	unsigned long sync_vfn, mm_addr;
-	struct sgx_encl_mm *encl_mm;
+    unsigned long mm_addr;
 	pr_info("enclave start releasing\n");
 
 	if (test_bit(SGX_ENCL_CLONE, &encl->flags)) {
@@ -1174,21 +1189,15 @@ void sgx_encl_release(struct kref *ref)
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0))
 	xa_destroy(&encl->page_array);
 #endif
-	mutex_lock(&encl->sync_lock);
-	xa_for_each(&encl->mm_sync_array, mm_addr, mm_sync_array) {
-
-		xa_for_each(&mm_sync_array->array, sync_vfn, sync_entry) {
-			if (sgx_encl_eunsync(encl, sync_entry->paddr, sync_vfn << PAGE_SHIFT, mm_addr))
-				pr_err("eunsync in sgx release failed with vaddr:0x%lx, paddr:0x%llx\n"
-				, sync_vfn << PAGE_SHIFT, sync_entry->paddr);
-			encl->sync_page_cnt--;
-			kfree(sync_entry);
+	if (!xa_empty(&encl->mm_sync_array)) {
+		pr_err("Sync pages should be released in sgx_release before sgx_encl_release!\n");
+		xa_for_each(&encl->mm_sync_array, mm_addr, sync_array_entry) {
+			pr_err("mm_sync_array belongs to mm_addr 0x%lx is not released!", mm_addr);
+			kfree(sync_array_entry);
+			xa_erase(&encl->mm_sync_array, mm_addr);
 		}
-		xa_destroy(&mm_sync_array->array);
-		kfree(mm_sync_array);
 	}
 	xa_destroy(&encl->mm_sync_array);
-	mutex_unlock(&encl->sync_lock);
 
 	xa_destroy(&encl->tcs_array);
 
@@ -1199,35 +1208,6 @@ void sgx_encl_release(struct kref *ref)
 	if (!encl->secs_child_cnt && encl->secs.epc_page) {
 		sgx_free_epc_page(encl->secs.epc_page, sgx_get_epc_phys_addr(encl->secs.epc_page));
 		encl->secs.epc_page = NULL;
-	}
-
-	/*
-	 * Drain the remaining mm_list entries. At this point the list contains
-	 * entries for processes, which have closed the enclave file but have
-	 * not exited yet. The processes, which have exited, are gone from the
-	 * list by sgx_mmu_notifier_release().
-	 */
-	for ( ; ; )  {
-		spin_lock(&encl->mm_lock);
-
-		if (list_empty(&encl->mm_list)) {
-			encl_mm = NULL;
-		} else {
-			encl_mm = list_first_entry(&encl->mm_list,
-						   struct sgx_encl_mm, list);
-			list_del_rcu(&encl_mm->list);
-		}
-
-		spin_unlock(&encl->mm_lock);
-
-		/* The enclave is no longer mapped by any mm. */
-		if (!encl_mm)
-			break;
-
-		synchronize_srcu(&encl->srcu);
-		xa_erase(encl->enclave_array, (unsigned long)encl_mm->mm);
-		mmu_notifier_unregister(&encl_mm->mmu_notifier, encl_mm->mm);
-		kfree(encl_mm);
 	}
 
 	/*
@@ -1272,44 +1252,65 @@ static void sgx_encl_mm_release_deferred(struct rcu_head *rcu)
 static void sgx_mmu_notifier_release(struct mmu_notifier *mn,
 				     struct mm_struct *mm)
 {
-	// The callback function will remove the item in mm_list which is required in encl_release
-	// just skip this part.
-// 	struct sgx_encl_mm *encl_mm = container_of(mn, struct sgx_encl_mm, mmu_notifier);
-// 	struct sgx_encl_mm *tmp = NULL;
+	struct sgx_encl_mm *encl_mm = container_of(mn, struct sgx_encl_mm, mmu_notifier);
+	struct sgx_encl_mm *tmp = NULL;
+	bool found = false;
+	unsigned long mm_addr, sync_vfn;
+	struct sgx_mm_sync_array *sync_array_entry;
+	struct sgx_encl_sync_page *sync_entry;
+	// pr_info("sgx_mmu_notifier_release, mm:0x%lx\n", (unsigned long)encl_mm->mm);
+	/*
+	 * The enclave itself can remove encl_mm.  Note, objects can't be moved
+	 * off an RCU protected list, but deletion is ok.
+	 */
+	spin_lock(&encl_mm->encl->mm_lock);
+	list_for_each_entry(tmp, &encl_mm->encl->mm_list, list) {
+		if (tmp == encl_mm) {
+			list_del_rcu(&encl_mm->list);
+			found = true;
+			break;
+		}
+	}
+	spin_unlock(&encl_mm->encl->mm_lock);
 
-// 	/*
-// 	 * The enclave itself can remove encl_mm.  Note, objects can't be moved
-// 	 * off an RCU protected list, but deletion is ok.
-// 	 */
-// 	spin_lock(&encl_mm->encl->mm_lock);
-// 	list_for_each_entry(tmp, &encl_mm->encl->mm_list, list) {
-// 		if (tmp == encl_mm) {
-// 			list_del_rcu(&encl_mm->list);
-// 			break;
-// 		}
-// 	}
-// 	spin_unlock(&encl_mm->encl->mm_lock);
-
-// 	if (tmp == encl_mm) {
-// 		synchronize_srcu(&encl_mm->encl->srcu);
-// #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0))
-// 		mmu_notifier_put(mn);
-// #else
-//             /*
-//             * Delay freeing encl_mm until after mmu_notifier synchronizes
-//             * its SRCU to ensure encl_mm cannot be dereferenced.
-//             */
-//             mmu_notifier_unregister_no_release(mn, mm);
-//             mmu_notifier_call_srcu(&encl_mm->rcu,
-//                                &sgx_encl_mm_release_deferred);
-// #endif
-// 	}
+	if (found) {
+		// Release all the synced page here
+		mutex_lock(&encl_mm->encl->sync_lock);
+		mm_addr = (unsigned long)encl_mm->mm;
+		// pr_info("sgx_mmu_notifier_release found, mm:0x%lx\n", mm_addr);
+		sync_array_entry = xa_load(&encl_mm->encl->mm_sync_array, mm_addr);
+		if (sync_array_entry) {
+			xa_for_each(&sync_array_entry->array, sync_vfn, sync_entry) {
+				// Mark the page as written, since we use a different pt in teevisor, the dirty bit should be synced back
+				if (sync_entry->paddr & 0x2) {
+					set_page_dirty(sync_entry->page);
+				}
+				// pr_info("sgx_encl_eunsync paddr %llx, vaddr: %lx, mm: %lx",sync_entry->paddr, sync_vfn << PAGE_SHIFT, mm_addr);
+				if (sgx_encl_eunsync(encl_mm->encl, sync_entry->paddr, sync_vfn << PAGE_SHIFT, mm_addr))
+					pr_err("eunsync in sgx release failed with vaddr:0x%lx, paddr:0x%llx\n"
+					, sync_vfn << PAGE_SHIFT, sync_entry->paddr);
+				encl_mm->encl->sync_page_cnt--;
+				put_page(sync_entry->page);
+				kfree(sync_entry);
+			}
+			xa_destroy(&sync_array_entry->array);
+			kfree(sync_array_entry);
+			xa_erase(&encl_mm->encl->mm_sync_array, mm_addr);
+		}
+		mutex_unlock(&encl_mm->encl->sync_lock);
+		synchronize_srcu(&encl_mm->encl->srcu);
+		mmu_notifier_put(mn);
+	}
 }
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0))
 static void sgx_mmu_notifier_free(struct mmu_notifier *mn)
 {
 	struct sgx_encl_mm *encl_mm = container_of(mn, struct sgx_encl_mm, mmu_notifier);
+
+	/* 'encl_mm' is going away, put encl_mm->encl reference: */
+	// pr_info("sgx_mmu_notifier_free refcount=%d, mm=0x%lx\n", kref_read(&encl_mm->encl->refcount), (unsigned long)encl_mm->mm);
+	kref_put(&encl_mm->encl->refcount, sgx_encl_release);
 
 	kfree(encl_mm);
 }
@@ -1340,9 +1341,15 @@ static int sgx_mmu_notifier_invalidate(struct mmu_notifier *mn,
 		xa_for_each_range(&sync_array_entry->array, sync_vfn, sync_entry, start, last) {
 			// pr_info("mmu_notifier eunsync: paddr=0x%llx, vaddr=0x%lx， mm=0x%lx\n",
 			// sync_entry->paddr, sync_vfn << PAGE_SHIFT, (unsigned long)mm);
+			// Mark the page as written, since we use a different pt in teevisor, the dirty bit should be synced back
+
+			if (sync_entry->paddr & 0x2) {
+				set_page_dirty(sync_entry->page);
+			}
 			int ret = sgx_encl_eunsync(encl, sync_entry->paddr, sync_vfn << PAGE_SHIFT, mm_addr);
 			if (!ret) {
 				xa_erase(&sync_array_entry->array, sync_vfn);
+				put_page(sync_entry->page);
 				kfree(sync_entry);
 			}
 		}
@@ -1413,6 +1420,8 @@ int sgx_encl_mm_add(struct sgx_encl *encl, struct mm_struct *mm)
 	if (!encl_mm)
 		return -ENOMEM;
 
+	kref_get(&encl->refcount);
+	// pr_info("sgx_encl_mm_add refcount=%d, mm=0x%lx\n", kref_read(&encl->refcount), (unsigned long)mm);
 	encl_mm->encl = encl;
 	encl_mm->mm = mm;
 	encl_mm->mmu_notifier.ops = &sgx_mmu_notifier_ops;

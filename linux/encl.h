@@ -44,7 +44,8 @@ struct sgx_mm_sync_array {
 };
 
 struct sgx_encl_sync_page {
-	u64 paddr;
+	struct page* page; // acquire after get_user_page
+	u64 paddr; // the page permission can change, just record the pte when the page is synced
 };
 
 enum sgx_encl_flags {

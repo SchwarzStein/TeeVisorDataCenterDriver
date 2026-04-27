@@ -1210,6 +1210,8 @@ retry:
 						   address, sync_entry->paddr);
 					goto sync_fail_page;
 				}
+
+				put_page(page);
 				encl->sync_page_cnt--;
 				unsynced = true;
 			}
@@ -1217,7 +1219,7 @@ retry:
 
 			ret = sgx_encl_esync(encl, paddr, address & PAGE_MASK, pte_present(*pte),
 								 pte_write(*pte), false, (u64)mm);
-			// pr_info("esync address: 0x%lx, paddr: 0x%llx, pte: 0x%lx, mm: 0x%lx\n", address, paddr, pte->pte, (unsigned long)mm);
+				// pr_info("esync address: 0x%lx, paddr: 0x%llx, pte: 0x%lx, mm: 0x%lx\n", address, paddr, pte->pte, (unsigned long)mm);
 			if (ret)
 			{
 				pr_err("esync has an error with vaddr:0x%lx, paddr:0x%llx, rwx: %d%d%d\n",
@@ -1233,6 +1235,7 @@ retry:
 			}
 
 			encl->sync_page_cnt++;
+			sync_entry->page = page;
 			sync_entry->paddr = paddr;
 			old_sync_entry = xa_store(&sync_array_entry->array, PFN_DOWN(address), sync_entry, GFP_KERNEL);
 
@@ -1251,20 +1254,11 @@ retry:
 				kfree(old_sync_entry);
 			}
 			mutex_unlock(&encl->sync_lock);
-			put_page(page);
+			// hold the page if esync is successful
 		} else {
-			// If a pf happened inside an enclave, can be three possible situations:
-			// 1. PF in EDMM and triggers EAUG, need to set VM_FAULT_SIGBUS to invoke the signal handler/
-			// 2. Not accepted page, the same as 1.
-			// 3. Accepted page with permission error, need to set VM_FAULT_SIGSEGV
-			// The difference between (1 , 2) and 3 here is the present bit should be set if the page is accepted.
-			
-			if (error_code & X86_PF_PROT) {
-				fault |= VM_FAULT_SIGSEGV;
-			} else {
-				fault |= VM_FAULT_SIGBUS;
+			if (fault != VM_FAULT_NOPAGE) {
+				goto handle_vm_fault;
 			}
-			goto handle_vm_fault;
 		}
 		up_read(&mm->mmap_lock);
 		return;
@@ -1417,9 +1411,9 @@ static void emulate_enclu(struct callback_head *work)
 	//dump_sgx_args(&param);
 	// TODO: error is hiden here, should return exact error if enclu failed
 	//       now just return GP.
-	//pr_info("run enclu");
+	// pr_info("cpu %d run enclu", smp_processor_id());
 	ret = snp_sgx_enclu(&param);
-	//pr_info("return from enclu");
+	// pr_info("cpu %d return from enclu, param.exit_reason %lld", smp_processor_id(), param.exit_reason);
 	//trace_printk("output param: ");
 	//dump_sgx_args(&param);
 	if (ret == SGX_ENCLAVE_CLONING) {

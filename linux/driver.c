@@ -80,23 +80,84 @@ free_enclave_array:
 static int sgx_release(struct inode *inode, struct file *file)
 {
 	struct sgx_encl *encl;
+	unsigned long mm_addr, sync_vfn;
+	struct sgx_mm_sync_array *sync_array_entry;
+	struct sgx_encl_sync_page *sync_entry;
 	unsigned long index, size_pages;
 	struct enclave_cache_block_entry *block_entry;
-	
-	rcu_read_lock();
+	struct sgx_encl_mm *encl_mm;
+	//pr_info("sgx_release start\n");
 	if (xa_empty(file->private_data)) {
 		kfree(file->private_data);
 	} else {
 		xa_for_each(file->private_data, index, encl) {
-			// If the device is opened and closed directly without mmap,
-			// the previously created enclave instance need to be released
-			if (kref_put(&encl->refcount, sgx_encl_release)) {
-			} else
-			{
-				pr_err("enclave with mm 0x%lx not released before fd released!", index);
+			// pr_info("sgx_release finds enclave with mm %lx, ecnl %lx\n", index, (unsigned long)encl);
+			/*
+			* Drain the remaining mm_list entries. At this point the list contains
+			* entries for processes, which have closed the enclave file but have
+			* not exited yet. The processes, which have exited, are gone from the
+			* list by sgx_mmu_notifier_release().
+			*/
+			for ( ; ; )  {
+				spin_lock(&encl->mm_lock);
+
+				if (list_empty(&encl->mm_list)) {
+					encl_mm = NULL;
+				} else {
+					encl_mm = list_first_entry(&encl->mm_list,
+								struct sgx_encl_mm, list);
+					list_del_rcu(&encl_mm->list);
+				}
+
+				spin_unlock(&encl->mm_lock);
+
+				/* The enclave is no longer mapped by any mm. */
+				if (!encl_mm)
+					break;
+
+				synchronize_srcu(&encl->srcu);
+				// pr_info("release mm :0x%lx in sgx_release", (unsigned long)encl_mm->mm);
+				mutex_lock(&encl->sync_lock);
+				mm_addr = (unsigned long)encl_mm->mm;
+				sync_array_entry = xa_load(&encl->mm_sync_array, mm_addr);
+				if (sync_array_entry) {
+					// pr_info("release sync_array with mm_addr: %lx\n", mm_addr);
+					xa_for_each(&sync_array_entry->array, sync_vfn, sync_entry) {
+						// Mark the page as written, since we use a different pt in teevisor, the dirty bit should be synced back
+						if (sync_entry->paddr & 0x2) {
+							set_page_dirty(sync_entry->page);
+						}
+						if (sgx_encl_eunsync(encl, sync_entry->paddr, sync_vfn << PAGE_SHIFT, mm_addr))
+							pr_err("eunsync in sgx release failed with vaddr:0x%lx, paddr:0x%llx\n"
+							, sync_vfn << PAGE_SHIFT, sync_entry->paddr);
+						encl->sync_page_cnt--;
+						put_page(sync_entry->page);
+						kfree(sync_entry);
+					}
+					xa_destroy(&sync_array_entry->array);
+					kfree(sync_array_entry);
+					xa_erase(&encl->mm_sync_array, mm_addr);
+				}
+				mutex_unlock(&encl->sync_lock);
+
+				xa_erase(encl->enclave_array, (unsigned long)encl_mm->mm);
+				mmu_notifier_unregister(&encl_mm->mmu_notifier, encl_mm->mm);
+				kfree(encl_mm);
+				// pr_info("sgx_release 1 refcount=%d, mm=0x%lx\n", kref_read(&encl->refcount), (unsigned long)encl_mm->mm);
+				kref_put(&encl->refcount, sgx_encl_release);
+			}
+			// kref_put counter = mm_count + 1
+			// For each enclave, need to put the kref one more time here
+			// If an enclave runs across several mm, it should be released during the first visit
+			// and skipped next time
+			// pr_info("sgx_release 2 refcount=%d, mm=0x%lx\n", kref_read(&encl->refcount), index);
+			// For each enclave, each mm will hit here once, but the kref should only be put once.
+			// Just read and put if the refcount is not 0, if the refcount is already 0, it means the enclave has been released, just skip it.
+
+			if (kref_read(&encl->refcount) && !kref_put(&encl->refcount, sgx_encl_release)) {
+				pr_err("enclave with mm 0x%lx not released before fd released!\n", index);
 				pr_err("encl array leaked\n");
 			}
-			
 		}
 	}
 
@@ -109,7 +170,7 @@ static int sgx_release(struct inode *inode, struct file *file)
 			xa_erase(&cache_block_array, index);
 		}
 	}
-	rcu_read_unlock();
+	kfree(file->private_data);
 	pr_info("device closed\n");
 	return 0;
 }
@@ -137,7 +198,6 @@ static int sgx_mmap(struct file *file, struct vm_area_struct *vma)
 	vm_flags_set(vma, VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP | VM_IO);
 	vma->vm_private_data = file->private_data;
 
-	kref_get(&encl->refcount);
 	return 0;
 }
 
