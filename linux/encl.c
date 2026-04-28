@@ -444,15 +444,9 @@ static int sgx_vma_fault(struct vm_fault *vmf)
 		// pr_info("eaug PFN_DOWN(addr):0x%lx start", PFN_DOWN(addr));
 		ret = sgx_encl_eaug_page(vma, encl, addr);
 		// pr_info("eaug PFN_DOWN(addr):0x%lx end", PFN_DOWN(addr));
-	} else if (!(entry->desc & PROT_READ) 
-            || (!(entry->desc & PROT_WRITE) && (vmf->flags & FAULT_FLAG_WRITE))
-            || (!(entry->desc & PROT_EXEC) && (vmf->flags & FAULT_FLAG_INSTRUCTION))) {
-        // We did map the pagetable in the linux pte, so parsing the permission here to
-        // decide the signal type
-        ret = VM_FAULT_SIGSEGV;
-    }
+	}
 	else {
-        ret = VM_FAULT_SIGBUS;
+        ret = VM_FAULT_SIGSEGV;
     }
 		
 	// pr_info("xa_load page_array end encl:%lx\n", (unsigned long)encl);

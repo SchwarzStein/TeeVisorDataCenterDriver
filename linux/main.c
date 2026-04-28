@@ -1099,6 +1099,7 @@ static void handle_pf(struct pt_regs *regs,
 	vm_fault_t fault;
 	unsigned int flags = FAULT_FLAG_DEFAULT;
 	struct page *page = NULL;
+	struct kernel_siginfo info;
 	pte_t *pte;
 	u64 paddr;
 	int ret;
@@ -1107,6 +1108,8 @@ static void handle_pf(struct pt_regs *regs,
 
 	tsk = current;
 	mm = tsk->mm;
+	clear_siginfo(&info);
+
 	//pr_info("try to handle pf address:%lx, error_code: %lx", address, error_code);
 	if (error_code & X86_PF_WRITE)
 		flags |= FAULT_FLAG_WRITE;
@@ -1255,17 +1258,11 @@ retry:
 			}
 			mutex_unlock(&encl->sync_lock);
 			// hold the page if esync is successful
-		} else {
-			if (fault != VM_FAULT_NOPAGE) {
-				goto handle_vm_fault;
-			}
 		}
 		up_read(&mm->mmap_lock);
 		return;
 	}
 
-
-handle_vm_fault:
 	up_read(&mm->mmap_lock);
 	// Here just kill the current task if OOM.
 	if (fault & VM_FAULT_OOM)
@@ -1278,16 +1275,20 @@ handle_vm_fault:
 		{
 			if (try_fixup_vdso_exception(regs, X86_TRAP_PF, error_code, address))
 				return;
-			force_sig(SIGBUS);
+			info.si_signo = SIGBUS;
+			info.si_code = BUS_ADRERR;
+			info.si_addr = (void __user *)address;
+			send_sig_info(SIGBUS, &info, current);
 		}
-		// force_sig_fault(SIGBUS, BUS_ADRERR, (void __user *)address);
 		else if (fault & VM_FAULT_SIGSEGV)
 		{
 			if (try_fixup_vdso_exception(regs, X86_TRAP_PF, error_code, address))
 				return;
-			force_sig(SIGSEGV);
+			info.si_signo = SIGSEGV;
+			info.si_code = vaddr_inside_enclave(encl, address) ? SEGV_ACCERR : SEGV_MAPERR;
+			info.si_addr = (void __user *)address;
+			send_sig_info(SIGSEGV, &info, current);
 		}
-		// force_sig_fault(SIGSEGV, SEGV_MAPERR, (void __user *)address);
 		else
 		{
 			pr_err("PF handling bug!\n");
@@ -1312,14 +1313,16 @@ static void do_trap(int trapnr, int signr, struct pt_regs *regs,
 	if (try_fixup_vdso_exception(regs, trapnr, error_code, (unsigned long)addr))
 		return;
 
-	// force_sig_fault is not exported
-	force_sig(signr);
-	/*
 	if (!sicode)
 		force_sig(signr);
-	else
-		force_sig_fault(signr, sicode, addr);
-	*/
+	else {
+		struct kernel_siginfo info;
+		clear_siginfo(&info);
+		info.si_signo = signr;
+		info.si_code = sicode;
+		info.si_addr = addr;
+		send_sig_info(signr, &info, current);
+	}
 }
 
 static __attribute__((unused))
