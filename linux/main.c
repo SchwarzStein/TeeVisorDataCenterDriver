@@ -1214,7 +1214,7 @@ retry:
 					goto sync_fail_page;
 				}
 
-				put_page(page);
+				put_page(sync_entry->page);
 				encl->sync_page_cnt--;
 				unsynced = true;
 			}
