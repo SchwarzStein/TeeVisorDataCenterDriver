@@ -1269,11 +1269,11 @@ static void sgx_mmu_notifier_release(struct mmu_notifier *mn,
 
 	if (found) {
 		// Release all the synced page here
-		mutex_lock(&encl_mm->encl->sync_lock);
 		mm_addr = (unsigned long)encl_mm->mm;
 		// pr_info("sgx_mmu_notifier_release found, mm:0x%lx\n", mm_addr);
 		sync_array_entry = xa_load(&encl_mm->encl->mm_sync_array, mm_addr);
 		if (sync_array_entry) {
+			mutex_lock(&sync_array_entry->sync_lock);
 			xa_for_each(&sync_array_entry->array, sync_vfn, sync_entry) {
 				// Mark the page as written, since we use a different pt in teevisor, the dirty bit should be synced back
 				if (sync_entry->paddr & 0x2) {
@@ -1288,10 +1288,10 @@ static void sgx_mmu_notifier_release(struct mmu_notifier *mn,
 				kfree(sync_entry);
 			}
 			xa_destroy(&sync_array_entry->array);
+			xa_erase(&encl_mm->encl->mm_sync_array, mm_addr); // Erase the entry before unlock to avoid racing with mmu_notifier_invalidate
+			mutex_unlock(&sync_array_entry->sync_lock);
 			kfree(sync_array_entry);
-			xa_erase(&encl_mm->encl->mm_sync_array, mm_addr);
 		}
-		mutex_unlock(&encl_mm->encl->sync_lock);
 		synchronize_srcu(&encl_mm->encl->srcu);
 		mmu_notifier_put(mn);
 	}
@@ -1328,10 +1328,10 @@ static int sgx_mmu_notifier_invalidate(struct mmu_notifier *mn,
 	encl = encl_mm->encl;
 	mm = encl_mm->mm;
 	mm_addr = (unsigned long)mm;
-	mutex_lock(&encl->sync_lock);
 
 	sync_array_entry = xa_load(&encl->mm_sync_array, mm_addr);
 	if (sync_array_entry) {
+		mutex_lock(&sync_array_entry->sync_lock);
 		xa_for_each_range(&sync_array_entry->array, sync_vfn, sync_entry, start, last) {
 			// pr_info("mmu_notifier eunsync: paddr=0x%llx, vaddr=0x%lx， mm=0x%lx\n",
 			// sync_entry->paddr, sync_vfn << PAGE_SHIFT, (unsigned long)mm);
@@ -1347,9 +1347,8 @@ static int sgx_mmu_notifier_invalidate(struct mmu_notifier *mn,
 				kfree(sync_entry);
 			}
 		}
+		mutex_unlock(&sync_array_entry->sync_lock);
 	}
-
-	mutex_unlock(&encl->sync_lock);
 	//pr_info("mmu_notifier end\n");
 
 	return 0;
@@ -1387,6 +1386,7 @@ static struct sgx_encl_mm *sgx_encl_find_mm(struct sgx_encl *encl,
 int sgx_encl_mm_add(struct sgx_encl *encl, struct mm_struct *mm)
 {
 	struct sgx_encl_mm *encl_mm;
+	struct sgx_mm_sync_array * sync_array_entry;
 	int ret;
 
 	/*
@@ -1414,6 +1414,21 @@ int sgx_encl_mm_add(struct sgx_encl *encl, struct mm_struct *mm)
 	if (!encl_mm)
 		return -ENOMEM;
 
+	sync_array_entry = kzalloc(sizeof(*sync_array_entry), GFP_KERNEL);
+	if (!sync_array_entry) {
+		kfree(encl_mm);
+		return -ENOMEM;
+	}
+
+	ret = xa_insert(&encl->mm_sync_array, (unsigned long)mm, sync_array_entry, GFP_KERNEL);
+	if (ret) {
+		kfree(encl_mm);
+		kfree(sync_array_entry);
+		return ret;
+	}
+	xa_init(&sync_array_entry->array);
+	mutex_init(&sync_array_entry->sync_lock);
+
 	kref_get(&encl->refcount);
 	// pr_info("sgx_encl_mm_add refcount=%d, mm=0x%lx\n", kref_read(&encl->refcount), (unsigned long)mm);
 	encl_mm->encl = encl;
@@ -1422,6 +1437,9 @@ int sgx_encl_mm_add(struct sgx_encl *encl, struct mm_struct *mm)
 
 	ret = __mmu_notifier_register(&encl_mm->mmu_notifier, mm);
 	if (ret) {
+		xa_erase(&encl->mm_sync_array, (unsigned long)mm);
+		xa_destroy(&sync_array_entry->array);
+		kfree(sync_array_entry);
 		kfree(encl_mm);
 		return ret;
 	}

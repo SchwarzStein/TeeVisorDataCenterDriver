@@ -1150,7 +1150,11 @@ retry:
 		// Try to sync the page if the page is outside the enclave
 		if (!vaddr_inside_enclave(encl, address))
 		{
-			mutex_lock(&encl->sync_lock);
+			sync_array_entry = xa_load(&encl->mm_sync_array, (unsigned long)mm);
+
+			if (!sync_array_entry)
+				goto sync_fail_before_lock;
+			mutex_lock(&sync_array_entry->sync_lock);
 
 			ret = get_user_pages(address, 1, 0, &page);
 			if (ret < 1)
@@ -1170,26 +1174,6 @@ retry:
 
 			paddr = (pte_pfn(*pte) << PAGE_SHIFT) | (pte_val(*pte) & 0x3);
 
-			sync_array_entry = xa_load(&encl->mm_sync_array, (unsigned long)mm);
-
-			if (!sync_array_entry) {
-				sync_array_entry = kmalloc(sizeof(*sync_array_entry), GFP_KERNEL);
-				if (!sync_array_entry) {
-					pr_err("No enough memory for new sync_array");
-					goto sync_fail_page;
-				}
-				xa_init(&sync_array_entry->array);
-				// We have already acquired the sync lock here, so do not need to consider
-				// thread contention here
-				ret = xa_insert(&encl->mm_sync_array, (unsigned long)mm, sync_array_entry, GFP_KERNEL);
-				if (ret) {
-					pr_err("No enough memory for inserting sync_array");
-					xa_destroy(&sync_array_entry->array);
-					kfree(sync_array_entry);
-					goto sync_fail_page;
-				}
-			}
-
 			sync_entry = xa_load(&sync_array_entry->array, PFN_DOWN(address));
 
 			// If the vaddr has already been synced, first try to unsync
@@ -1198,7 +1182,7 @@ retry:
 				if (sync_entry->paddr == paddr)
 				{
 					// The page is already synced
-					mutex_unlock(&encl->sync_lock);
+					mutex_unlock(&sync_array_entry->sync_lock);
 					put_page(page);
 					up_read(&mm->mmap_lock);
 					return;
@@ -1256,7 +1240,7 @@ retry:
 				}
 				kfree(old_sync_entry);
 			}
-			mutex_unlock(&encl->sync_lock);
+			mutex_unlock(&sync_array_entry->sync_lock);
 			// hold the page if esync is successful
 		}
 		up_read(&mm->mmap_lock);
@@ -1301,8 +1285,9 @@ retry:
 sync_fail_page:
 	put_page(page);
 sync_fail:
+	mutex_unlock(&sync_array_entry->sync_lock);
+sync_fail_before_lock:
 	force_sig(SIGKILL);
-	mutex_unlock(&encl->sync_lock);
 	up_read(&mm->mmap_lock);
 	return;
 }
@@ -1414,7 +1399,7 @@ static void emulate_enclu(struct callback_head *work)
 	//dump_sgx_args(&param);
 	// TODO: error is hiden here, should return exact error if enclu failed
 	//       now just return GP.
-	// pr_info("cpu %d run enclu", smp_processor_id());
+	// pr_info("cpu %d run enclu, tcs_paddr: 0x%llx, mm: 0x%llx", smp_processor_id(), param.tcs_paddr, param.mm);
 	ret = snp_sgx_enclu(&param);
 	// pr_info("cpu %d return from enclu, param.exit_reason %lld", smp_processor_id(), param.exit_reason);
 	//trace_printk("output param: ");

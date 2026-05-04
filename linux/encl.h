@@ -40,6 +40,7 @@ struct sgx_encl_page {
 };
 
 struct sgx_mm_sync_array {
+	struct mutex sync_lock;
 	struct xarray array;
 };
 
@@ -78,7 +79,6 @@ struct sgx_encl {
 	unsigned int secs_child_cnt;
 	unsigned int sync_page_cnt;
 	struct mutex lock;
-	struct mutex sync_lock;
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0))
 	struct xarray page_array;
 	struct xarray mm_sync_array;

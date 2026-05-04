@@ -51,7 +51,6 @@ static int sgx_open(struct inode *inode, struct file *file)
 	INIT_RADIX_TREE(&encl->page_tree, GFP_KERNEL);
 #endif
 	mutex_init(&encl->lock);
-	mutex_init(&encl->sync_lock);
 	//INIT_LIST_HEAD(&encl->va_pages);
 	INIT_LIST_HEAD(&encl->mm_list);
 	spin_lock_init(&encl->mm_lock);
@@ -117,11 +116,11 @@ static int sgx_release(struct inode *inode, struct file *file)
 
 				synchronize_srcu(&encl->srcu);
 				// pr_info("release mm :0x%lx in sgx_release", (unsigned long)encl_mm->mm);
-				mutex_lock(&encl->sync_lock);
 				mm_addr = (unsigned long)encl_mm->mm;
 				sync_array_entry = xa_load(&encl->mm_sync_array, mm_addr);
 				if (sync_array_entry) {
 					// pr_info("release sync_array with mm_addr: %lx\n", mm_addr);
+					mutex_lock(&sync_array_entry->sync_lock);
 					xa_for_each(&sync_array_entry->array, sync_vfn, sync_entry) {
 						// Mark the page as written, since we use a different pt in teevisor, the dirty bit should be synced back
 						if (sync_entry->paddr & 0x2) {
@@ -135,10 +134,10 @@ static int sgx_release(struct inode *inode, struct file *file)
 						kfree(sync_entry);
 					}
 					xa_destroy(&sync_array_entry->array);
-					kfree(sync_array_entry);
 					xa_erase(&encl->mm_sync_array, mm_addr);
+					mutex_unlock(&sync_array_entry->sync_lock); // Unlock after erasing to avoid racing with mmu_notifier_invalidate
+					kfree(sync_array_entry);
 				}
-				mutex_unlock(&encl->sync_lock);
 
 				xa_erase(encl->enclave_array, (unsigned long)encl_mm->mm);
 				mmu_notifier_unregister(&encl_mm->mmu_notifier, encl_mm->mm);
