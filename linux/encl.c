@@ -1310,7 +1310,7 @@ static void sgx_mmu_notifier_free(struct mmu_notifier *mn)
 }
 #endif
 
-static int sgx_mmu_notifier_invalidate(struct mmu_notifier *mn,
+static int sgx_mmu_notifier_invalidate_start(struct mmu_notifier *mn,
 				      const struct mmu_notifier_range *range)
 {
 	struct sgx_encl* encl;
@@ -1347,16 +1347,39 @@ static int sgx_mmu_notifier_invalidate(struct mmu_notifier *mn,
 				kfree(sync_entry);
 			}
 		}
-		mutex_unlock(&sync_array_entry->sync_lock);
+		// mutex_unlock(&sync_array_entry->sync_lock);
 	}
-	//pr_info("mmu_notifier end\n");
+	//pr_info("mmu_notifier_start end\n");
 
 	return 0;
 }
 
+static void sgx_mmu_notifier_invalidate_end(struct mmu_notifier *mn,
+				      const struct mmu_notifier_range *range)
+{
+	struct sgx_encl* encl;
+	struct mm_struct *mm;
+	unsigned long mm_addr;
+
+	struct sgx_mm_sync_array *sync_array_entry;
+	struct sgx_encl_mm *encl_mm = container_of(mn, struct sgx_encl_mm, mmu_notifier);
+
+	//pr_info("mmu_notifier end，range start=0x%lx, end=0x%lx\n", range->start, range->end);
+	encl = encl_mm->encl;
+	mm = encl_mm->mm;
+	mm_addr = (unsigned long)mm;
+
+	sync_array_entry = xa_load(&encl->mm_sync_array, mm_addr);
+	if (sync_array_entry) {
+		mutex_unlock(&sync_array_entry->sync_lock);
+	}
+}
+
+
 static const struct mmu_notifier_ops sgx_mmu_notifier_ops = {
 	.release		= sgx_mmu_notifier_release,
-	.invalidate_range_start = sgx_mmu_notifier_invalidate,
+	.invalidate_range_start = sgx_mmu_notifier_invalidate_start,
+	.invalidate_range_end = sgx_mmu_notifier_invalidate_end,
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0))
 	.free_notifier		= sgx_mmu_notifier_free,
 #endif
