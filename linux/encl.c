@@ -725,6 +725,7 @@ static struct sgx_encl *clone_enclave(struct sgx_encl *parent_encl)
 	}
 	
 end_elcone:
+	free_buffer_page(ec);
 	kfree(parent_encl->clone_info);
 	parent_encl->clone_info = NULL;
 	mutex_unlock(&child_encl->lock);
@@ -749,7 +750,9 @@ clone_abort:
 			kfree(entry);
 		}
 	}
-
+	if (ec) {
+		free_buffer_page(ec);
+	}
 	xa_destroy(&child_encl->page_array);
 	xa_destroy(&child_encl->mm_sync_array);
 	mutex_unlock(&child_encl->lock);
