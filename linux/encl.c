@@ -730,7 +730,6 @@ end_elcone:
 	parent_encl->clone_info = NULL;
 	mutex_unlock(&child_encl->lock);
 	mutex_unlock(&parent_encl->lock);
-	preempt_enable();
 	return child_encl;
 
 clone_abort:
