@@ -31,6 +31,8 @@
 #define MSR_X2APIC_TDCR 0x83E
 #define MSR_X2APIC_CURRENT_COUNT 0x839
 #define TIMER 0xff
+#define ENCLU_EENTER 2
+#define ENCLU_ERESUME 3
 
 #ifndef FEAT_CTL_LOCKED
 #define FEAT_CTL_LOCKED FEATURE_CONTROL_LOCKED
@@ -60,6 +62,52 @@ static DEFINE_SPINLOCK(sgx_page_pool_lock);
 // static DEFINE_SPINLOCK(sgx_reclaimer_lock);
 
 static struct notifier_block die_notifier;
+
+static atomic64_t eenter_count = ATOMIC64_INIT(0);
+static atomic64_t aex_count = ATOMIC64_INIT(0);
+static atomic64_t eexit_count = ATOMIC64_INIT(0);
+
+static int exit_counter_get(char *buffer, const struct kernel_param *kp)
+{
+	return scnprintf(buffer, PAGE_SIZE, "%lld\n",
+			 (long long)atomic64_read(kp->arg));
+}
+
+static int clear_counters_set(const char *value, const struct kernel_param *kp)
+{
+	bool clear;
+	int ret;
+
+	(void)kp;
+	ret = kstrtobool(value, &clear);
+	if (ret)
+		return ret;
+	if (!clear)
+		return -EINVAL;
+
+	atomic64_set(&eenter_count, 0);
+	atomic64_set(&aex_count, 0);
+	atomic64_set(&eexit_count, 0);
+
+	return 0;
+}
+
+static const struct kernel_param_ops exit_counter_ops = {
+	.get = exit_counter_get,
+};
+
+static const struct kernel_param_ops clear_counters_ops = {
+	.set = clear_counters_set,
+};
+
+module_param_cb(eenter_count, &exit_counter_ops, &eenter_count, 0444);
+MODULE_PARM_DESC(eenter_count, "Number of ENCLU(EENTER) and ENCLU(ERESUME) operations");
+module_param_cb(aex_count, &exit_counter_ops, &aex_count, 0444);
+MODULE_PARM_DESC(aex_count, "Number of asynchronous enclave exits");
+module_param_cb(eexit_count, &exit_counter_ops, &eexit_count, 0444);
+MODULE_PARM_DESC(eexit_count, "Number of normal ENCLU(EEXIT) operations");
+module_param_cb(clear_counters, &clear_counters_ops, NULL, 0200);
+MODULE_PARM_DESC(clear_counters, "Write 1 to reset all enclave entry and exit counters");
 
 /*
  * Reset dirty EPC pages to uninitialized state. Laundry can be left with SECS
@@ -1349,10 +1397,12 @@ static void emulate_enclu(struct callback_head *work)
 	struct task_struct *tsk;
 	struct mm_struct *mm;
 	int ret;
+	bool is_entry;
 
 	tsk = current;
 	mm = tsk->mm;
 	regs = task_pt_regs(current);
+	is_entry = regs->ax == ENCLU_EENTER || regs->ax == ENCLU_ERESUME;
 	tcs_vaddr = regs->bx;
 	encl = get_encl_from_vaddr(tcs_vaddr);
 	if (!encl)
@@ -1422,6 +1472,8 @@ static void emulate_enclu(struct callback_head *work)
 		do_trap(X86_TRAP_GP, SIGSEGV, regs, 0, 0, (void *)regs->ip);
 		return;
 	}
+	if (is_entry)
+		atomic64_inc(&eenter_count);
 
 	regs->ax = param.rax;
 	regs->bx = param.rbx;
@@ -1445,6 +1497,7 @@ static void emulate_enclu(struct callback_head *work)
 	switch (param.exit_reason)
 	{
 	case EXIT_REASON_INTERRUPT:
+		atomic64_inc(&aex_count);
 		current->thread.trap_nr = param.vector;
 		current->thread.error_code = param.error_code;
 		//pr_info("EXIT_REASON_INTERRUPT vector:%lld", param.vector);
@@ -1498,9 +1551,11 @@ static void emulate_enclu(struct callback_head *work)
 		}
 		break;
 	case EXIT_REASON_EEXIT:
+		atomic64_inc(&eexit_count);
 		//pr_info("EXIT_REASON_EEXIT");
 		break;
 	case EXIT_REASON_TIMER:
+		atomic64_inc(&aex_count);
 		cond_resched();
 		break;
 	case EXIT_REASON_CLONE:
