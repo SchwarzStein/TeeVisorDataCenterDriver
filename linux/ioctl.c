@@ -170,7 +170,10 @@ static int sgx_encl_create(struct sgx_encl *encl, struct sgx_secs *secs)
 			goto err_out_clone;
 		}
 
-		if (xa_insert(&clone_sync_array, secs_epc->pfn, sync_entry, GFP_KERNEL)) {
+		mutex_lock(&clone_sync_array_lock);
+		ret = xa_insert(&clone_sync_array, secs_epc->pfn, sync_entry, GFP_KERNEL);
+		mutex_unlock(&clone_sync_array_lock);
+		if (ret) {
 			pr_err("sync page of the enclave has already been added!");
 			ret = -EIO;
 			goto err_out_clone;
@@ -1236,16 +1239,21 @@ static long sgx_enclave_modify_types(struct sgx_encl *encl,
 		ret = __emodt(virt_to_phys(secinfo), epc_phys, sgx_get_epc_phys_addr(encl->secs.epc_page));
 		// EMODT can trigger cow, thus need to handle specific cow error
 		if (ret == SGX_SYNC_PAGE_FULL || ret == SGX_NO_CACHE_PAGE) {
+			mutex_unlock(&encl->lock);
+
 			if (ret == SGX_SYNC_PAGE_FULL) {
 				try_do_sync_page(encl);
-			}
-			
-			if (ret == SGX_NO_CACHE_PAGE) {
-				add_enclave_cache_block(encl);
+			} else {
+				/* Retire the exhausted block before adding its replacement. */
+				try_do_sync_page(encl);
+				mutex_lock(&encl->lock);
+				ret = add_enclave_cache_block(encl);
+				if (ret)
+					goto out_entry_changed;
+				mutex_unlock(&encl->lock);
 			}
 
 			c -= PAGE_SIZE;
-			mutex_unlock(&encl->lock);
 			continue;
 		}
 

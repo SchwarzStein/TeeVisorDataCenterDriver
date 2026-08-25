@@ -838,7 +838,11 @@ static void sgx_vma_open(struct vm_area_struct *vma)
 					goto err_ecsync;
 				}
 
-				if (xa_insert(&clone_sync_array, encl->secs.epc_page->pfn, sync_entry, GFP_KERNEL)) {
+				mutex_lock(&clone_sync_array_lock);
+				ret = xa_insert(&clone_sync_array, encl->secs.epc_page->pfn,
+						sync_entry, GFP_KERNEL);
+				mutex_unlock(&clone_sync_array_lock);
+				if (ret) {
 					pr_err("sync page of the enclave has already been added!");
 					ret = -EIO;
 					goto err_ecsync;
@@ -1154,8 +1158,11 @@ void sgx_encl_release(struct kref *ref)
 			pr_err("ECCLEARCACHE failed with ret %d!", ret);
 		}
 		
+		mutex_lock(&clone_sync_array_lock);
 		clone_sync_entry = xa_erase(&clone_sync_array, encl->secs.epc_page->pfn);
-		sync_page_once(clone_sync_entry, true);
+		mutex_unlock(&clone_sync_array_lock);
+		if (clone_sync_entry)
+			sync_page_once(clone_sync_entry, true);
 		synchronize_rcu();
 		sgx_free_epc_page(encl->cow_sync_page.epc_page, sgx_get_epc_phys_addr(encl->secs.epc_page));
 		encl->secs_child_cnt--;

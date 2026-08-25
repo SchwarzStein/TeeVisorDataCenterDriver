@@ -124,6 +124,7 @@ extern const struct vm_operations_struct sgx_vm_ops;
 
 extern struct xarray clone_sync_array;
 extern struct xarray cache_block_array;
+extern struct mutex clone_sync_array_lock;
 
 struct enclave_sync_page_slot
 {

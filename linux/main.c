@@ -53,6 +53,7 @@ static DECLARE_WAIT_QUEUE_HEAD(kenclaved_waitq);
 
 DEFINE_XARRAY(clone_sync_array);
 DEFINE_XARRAY(cache_block_array);
+DEFINE_MUTEX(clone_sync_array_lock);
 
 // This list is stores all the allocated page.
 static LIST_HEAD(sgx_page_pool);
@@ -1454,6 +1455,12 @@ static void emulate_enclu(struct callback_head *work)
 		break;
 	// No enough cache for the copy on write. Add new cache block.
 	case EXIT_REASON_CACHE:
+		/*
+		 * The slot for the last page in the old cache block can still be
+		 * pending.  Drain it first so current_cache_block is retired before
+		 * deciding whether a replacement block is needed.
+		 */
+		try_do_sync_page(encl);
 		mutex_lock(&encl->lock);
 		ret = add_enclave_cache_block(encl);
 		mutex_unlock(&encl->lock);
@@ -1474,12 +1481,16 @@ static void emulate_enclu(struct callback_head *work)
 void try_do_sync_page(struct sgx_encl *encl)
 {
 	struct enclave_clone_sync_entry* sync_entry;
+
+	mutex_lock(&clone_sync_array_lock);
 	sync_entry = xa_load(&clone_sync_array, encl->secs.epc_page->pfn);
 	if (!sync_entry) {
 		pr_err("sync page does not exist in the clone_sync_array\n");
+		mutex_unlock(&clone_sync_array_lock);
 		return;
 	}
 	sync_page_once(sync_entry, false);
+	mutex_unlock(&clone_sync_array_lock);
 	return;
 }
 
@@ -1489,6 +1500,7 @@ int add_enclave_cache_block(struct sgx_encl *encl)
 	bool get_block = false;
 	unsigned long block_addr;
 	struct enclave_cache_block_entry *block_entry;
+	int order;
 	int ret;
 
 	// In multi thread cases, if a block is already added, just return
@@ -1497,7 +1509,7 @@ int add_enclave_cache_block(struct sgx_encl *encl)
 		return 0;
 	}
 
-	for(unsigned int order = 10; order >= 0; order--) {
+	for (order = 10; order >= 0; order--) {
 		block_addr = __get_free_pages(GFP_KERNEL, order);
 		if (block_addr) {
 			block_entry = kmalloc(sizeof(struct enclave_cache_block_entry), GFP_KERNEL);
@@ -1507,7 +1519,7 @@ int add_enclave_cache_block(struct sgx_encl *encl)
 				return -ENOMEM;
 			}
 			block_entry->start = virt_to_phys((void *)block_addr);
-			block_entry->end = virt_to_phys((void *)block_addr) + ((1 << order) - 1) * PAGE_SIZE;
+			block_entry->end = virt_to_phys((void *)block_addr) + ((1UL << order) - 1) * PAGE_SIZE;
 			atomic_long_set_release(&block_entry->counter, 0);
 			// use the end pfn as the index since xa api only support get index forward
 			if (xa_insert(&cache_block_array, PFN_DOWN(block_entry->end), block_entry, GFP_KERNEL)) {
@@ -1517,7 +1529,7 @@ int add_enclave_cache_block(struct sgx_encl *encl)
 				return -ENOMEM;
 			}
 
-			ret = __ecaddcache(sgx_get_epc_phys_addr(encl->secs.epc_page), block_entry->start, 1<<order);
+			ret = __ecaddcache(sgx_get_epc_phys_addr(encl->secs.epc_page), block_entry->start, 1UL << order);
 			if (ret) {
 				xa_erase(&cache_block_array, PFN_DOWN(block_entry->end));
 				free_pages(block_addr, order);
@@ -1596,7 +1608,7 @@ static bool enclave_should_sync(void)
 	xa_for_each(&clone_sync_array, secs, sync_entry) {
     	sync_slot = (struct enclave_sync_page_slot*)sgx_get_epc_virt_addr(sync_entry->sync_page_epc);
 		for (int i = 0; i < SYNC_PAGE_SLOT_NUM; i++) {
-			if (sync_slot[i].state == SLOT_READY) {
+			if (READ_ONCE(sync_slot[i].state) == SLOT_READY) {
 				rcu_read_unlock();
 				return true;
 			}
@@ -1617,14 +1629,21 @@ void sync_page_once(struct enclave_clone_sync_entry* sync_entry, bool terminate)
 	struct sgx_epc_page *old_epc_page;
 	long counter;
 	unsigned long new_paddr_pfn, block_end_paddr;
+	bool progressed;
+	int pass;
 
 	encl = sync_entry->encl;
 	mutex_lock(&sync_entry->lock);
 	mutex_lock(&encl->lock);
 	sync_slot = (struct enclave_sync_page_slot*)sgx_get_epc_virt_addr(sync_entry->sync_page_epc);
-	for (int i = 0; i < SYNC_PAGE_SLOT_NUM; i++) {
-		old_state = READ_ONCE(sync_slot[i].state);
-		if (old_state == SLOT_READY && try_cmpxchg(&sync_slot[i].state, &old_state, SLOT_READING)) {
+	for (pass = 0; pass < SYNC_PAGE_SLOT_NUM; pass++) {
+		progressed = false;
+		for (int i = 0; i < SYNC_PAGE_SLOT_NUM; i++) {
+			old_state = READ_ONCE(sync_slot[i].state);
+			if (old_state != SLOT_READY ||
+			    !try_cmpxchg(&sync_slot[i].state, &old_state, SLOT_READING))
+				continue;
+
 			// update slot if the slot is ready
 			page_entry = xa_load(&encl->page_array, PFN_DOWN(sync_slot[i].vaddr));
 			if (!page_entry || page_entry->epc_page->pfn != PFN_DOWN(sync_slot[i].old_paddr)) {
@@ -1635,9 +1654,7 @@ void sync_page_once(struct enclave_clone_sync_entry* sync_entry, bool terminate)
 				}
 				
 				smp_store_release(&sync_slot[i].state, SLOT_READY);
-				mutex_unlock(&encl->lock);
-				mutex_unlock(&sync_entry->lock);
-				return;
+				continue;
 			}
 
 			// To sync the update, first get the common epc_page and decrement the counter.
@@ -1646,9 +1663,7 @@ void sync_page_once(struct enclave_clone_sync_entry* sync_entry, bool terminate)
 			if (counter < 2) {
 				pr_err("Invalid epc page to update, the page should have more than one reference!");
 				smp_store_release(&sync_slot[i].state, SLOT_READY);
-				mutex_unlock(&encl->lock);
-				mutex_unlock(&sync_entry->lock);
-				return;
+				continue;
 			}
 
 			pr_info("Get cache update: vaddr: 0x%llx, paddr: 0x%llx, old_paddr: 0x%llx\n", sync_slot[i].vaddr, sync_slot[i].new_paddr, sync_slot[i].old_paddr);
@@ -1659,9 +1674,7 @@ void sync_page_once(struct enclave_clone_sync_entry* sync_entry, bool terminate)
 			if (!block_entry || block_entry->start > sync_slot[i].new_paddr) {
 				pr_err("Invalid new paddr, cannot find the backend block!");
 				smp_store_release(&sync_slot[i].state, SLOT_READY);
-				mutex_unlock(&encl->lock);
-				mutex_unlock(&sync_entry->lock);
-				return;
+				continue;
 			}
 
 			cache_page_epc = sgx_alloc_epc_page_cache(page_entry, new_paddr_pfn);
@@ -1681,14 +1694,21 @@ void sync_page_once(struct enclave_clone_sync_entry* sync_entry, bool terminate)
 			atomic_long_inc_return_release(&block_entry->counter);
 			page_entry->epc_page = cache_page_epc;
 			atomic_long_dec_return_release(&old_epc_page->counter);
-			if (sync_slot[i].new_paddr == block_entry->end)
+			if (sync_slot[i].new_paddr == block_entry->end) {
 				atomic_long_set_release(&block_entry->consumed, 1);
+				if (encl->current_cache_block == block_entry)
+					encl->current_cache_block = NULL;
+			}
 			smp_store_release(&sync_slot[i].state, SLOT_FREE);
+			progressed = true;
 		}
+		if (!progressed)
+			break;
 	}
 
 	if (terminate && encl->current_cache_block) {
 		atomic_long_set_release(&encl->current_cache_block->consumed, 1);
+		encl->current_cache_block = NULL;
 	}
 	mutex_unlock(&encl->lock);
 	mutex_unlock(&sync_entry->lock);
@@ -1699,13 +1719,14 @@ static void do_page_sync(void)
 	unsigned long secs;
 	struct enclave_clone_sync_entry* sync_entry;
 
-	rcu_read_lock();
+	/* Keep entries alive while sync_page_once() sleeps on its mutexes. */
+	mutex_lock(&clone_sync_array_lock);
 	xa_for_each(&clone_sync_array, secs, sync_entry) {
 		//pr_info("do page sync secs: 0x%lx", secs);
 		sync_page_once(sync_entry, false);
 	}
 
-	rcu_read_unlock();
+	mutex_unlock(&clone_sync_array_lock);
 
 }
 
