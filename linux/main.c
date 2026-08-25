@@ -1614,6 +1614,7 @@ void sync_page_once(struct enclave_clone_sync_entry* sync_entry, bool terminate)
 	struct sgx_encl_page *page_entry;
 	struct enclave_cache_block_entry* block_entry;
 	struct sgx_epc_page *cache_page_epc;
+	struct sgx_epc_page *old_epc_page;
 	long counter;
 	unsigned long new_paddr_pfn, block_end_paddr;
 
@@ -1633,7 +1634,7 @@ void sync_page_once(struct enclave_clone_sync_entry* sync_entry, bool terminate)
 					pr_err("page_entry->epc_page->pfn :%lx, old_paddr :%llx, ", page_entry->epc_page->pfn, sync_slot[i].old_paddr);
 				}
 				
-				sync_slot[i].state = SLOT_READY;
+				smp_store_release(&sync_slot[i].state, SLOT_READY);
 				mutex_unlock(&encl->lock);
 				mutex_unlock(&sync_entry->lock);
 				return;
@@ -1644,35 +1645,45 @@ void sync_page_once(struct enclave_clone_sync_entry* sync_entry, bool terminate)
 			counter = atomic_long_read(&page_entry->epc_page->counter);
 			if (counter < 2) {
 				pr_err("Invalid epc page to update, the page should have more than one reference!");
-				sync_slot[i].state = SLOT_READY;
+				smp_store_release(&sync_slot[i].state, SLOT_READY);
 				mutex_unlock(&encl->lock);
 				mutex_unlock(&sync_entry->lock);
 				return;
 			}
 
 			pr_info("Get cache update: vaddr: 0x%llx, paddr: 0x%llx, old_paddr: 0x%llx\n", sync_slot[i].vaddr, sync_slot[i].new_paddr, sync_slot[i].old_paddr);
-			atomic_long_dec_return_release(&page_entry->epc_page->counter);
 			new_paddr_pfn = PFN_DOWN(sync_slot[i].new_paddr);
 			block_end_paddr = new_paddr_pfn;
 
 			block_entry = xa_find(&cache_block_array, &block_end_paddr, ULONG_MAX, XA_PRESENT);
 			if (!block_entry || block_entry->start > sync_slot[i].new_paddr) {
 				pr_err("Invalid new paddr, cannot find the backend block!");
+				smp_store_release(&sync_slot[i].state, SLOT_READY);
 				mutex_unlock(&encl->lock);
 				mutex_unlock(&sync_entry->lock);
 				return;
 			}
 
-			atomic_long_inc_return_release(&block_entry->counter);
-			if (sync_slot[i].new_paddr == block_entry->end) {
-				atomic_long_set_release(&block_entry->consumed, 1);
+			cache_page_epc = sgx_alloc_epc_page_cache(page_entry, new_paddr_pfn);
+			if (!cache_page_epc) {
+				pr_err_ratelimited("Cannot allocate EPC metadata for COW cache page\n");
+				smp_store_release(&sync_slot[i].state, SLOT_READY);
+				continue;
 			}
 
-			cache_page_epc = sgx_alloc_epc_page_cache(page_entry, new_paddr_pfn);
-			if (cache_page_epc) {
-				page_entry->epc_page = cache_page_epc;
-				sync_slot[i].state = SLOT_FREE;
-			}
+			/*
+			 * Publish the replacement only after every fallible operation has
+			 * succeeded.  The previous ordering dropped the old reference first
+			 * and could leave the slot permanently in SLOT_READING when metadata
+			 * allocation failed, corrupting both the page and cache counters.
+			 */
+			old_epc_page = page_entry->epc_page;
+			atomic_long_inc_return_release(&block_entry->counter);
+			page_entry->epc_page = cache_page_epc;
+			atomic_long_dec_return_release(&old_epc_page->counter);
+			if (sync_slot[i].new_paddr == block_entry->end)
+				atomic_long_set_release(&block_entry->consumed, 1);
+			smp_store_release(&sync_slot[i].state, SLOT_FREE);
 		}
 	}
 
