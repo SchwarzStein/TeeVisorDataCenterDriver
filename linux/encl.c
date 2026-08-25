@@ -107,6 +107,8 @@ int sgx_encl_esync(struct sgx_encl *encl, u64 paddr, u64 vaddr, bool read, bool 
 	secinfo = kzalloc(sizeof(struct sgx_secinfo), GFP_KERNEL);
 
 	if (!pginfo || !secinfo) {
+		kfree(pginfo);
+		kfree(secinfo);
 		return -ENOMEM;
 	}
 
@@ -154,6 +156,8 @@ int sgx_encl_eunsync(struct sgx_encl *encl, u64 paddr, u64 vaddr, u64 mm)
 	secinfo = kzalloc(sizeof(struct sgx_secinfo), GFP_KERNEL);
 
 	if (!pginfo || !secinfo) {
+		kfree(pginfo);
+		kfree(secinfo);
 		return -ENOMEM;
 	}
 

@@ -990,62 +990,6 @@ static struct sgx_encl *get_encl_from_vaddr(unsigned long vaddr)
 	return encl;
 }
 
-static pte_t vaddr_to_pte_calibrated(unsigned long vaddr, struct mm_struct *mm)
-{
-    pgd_t *pgd;
-    p4d_t *p4d;
-    pud_t *pud;
-    pmd_t *pmd;
-    pte_t *ptep;
-    phys_addr_t phys_base;
-    unsigned long offset, flags;
-
-    pgd = pgd_offset(mm, vaddr);
-    if (pgd_none(*pgd)) return __pte(0);
-    if (pgd_leaf(*pgd)) {
-        flags = pgd_val(*pgd) & ~PAGE_MASK;
-        offset = vaddr & ~PGDIR_MASK;
-        phys_base = (phys_addr_t)pgd_pfn(*pgd) << PAGE_SHIFT;
-        return __pte((phys_base + offset) | (flags & ~PAGE_MASK));
-    }
-
-    p4d = p4d_offset(pgd, vaddr);
-    if (p4d_none(*p4d)) return __pte(0);
-    if (p4d_leaf(*p4d)) {
-        flags = p4d_val(*p4d) & ~PAGE_MASK;
-        offset = vaddr & ~P4D_MASK;
-        phys_base = (phys_addr_t)p4d_pfn(*p4d) << PAGE_SHIFT;
-        return __pte((phys_base + offset) | (flags & ~PAGE_MASK));
-    }
-
-    pud = pud_offset(p4d, vaddr);
-    if (pud_none(*pud)) return __pte(0);
-    if (pud_leaf(*pud)) {
-        flags = pud_val(*pud) & ~PAGE_MASK;
-        offset = vaddr & ~PUD_MASK; 
-        phys_base = (phys_addr_t)pud_pfn(*pud) << PAGE_SHIFT;
-        return __pte((phys_base + offset) | (flags & ~PAGE_MASK));
-    }
-
-    pmd = pmd_offset(pud, vaddr);
-    if (pmd_none(*pmd)) return __pte(0);
-    if (pmd_leaf(*pmd) || pmd_trans_huge(*pmd)) {
-        flags = pmd_val(*pmd) & ~PAGE_MASK;
-        offset = vaddr & ~PMD_MASK;
-        phys_base = (phys_addr_t)pmd_pfn(*pmd) << PAGE_SHIFT;
-        return __pte((phys_base + offset) | (flags & ~PAGE_MASK));
-    }
-
-    ptep = pte_offset_kernel(pmd, vaddr);
-    if (pte_none(*ptep)) return __pte(0);
-
-    flags = pte_val(*ptep) & ~PAGE_MASK;
-    offset = vaddr & ~PAGE_MASK;
-    phys_base = (phys_addr_t)pte_pfn(*ptep) << PAGE_SHIFT;
-
-    return __pte((phys_base + offset) | (flags & 0xFFF));
-}
-
 struct vdso_exception_table_entry
 {
 	int insn, fixup;
@@ -1099,17 +1043,16 @@ static void handle_pf(struct pt_regs *regs,
 	struct task_struct *tsk;
 	struct mm_struct *mm;
 	struct sgx_encl_sync_page *sync_entry;
+	struct sgx_encl_sync_page *new_sync_entry;
 	struct sgx_mm_sync_array *sync_array_entry;
 	vm_fault_t fault;
 	unsigned int flags = FAULT_FLAG_DEFAULT;
+	unsigned int gup_flags = 0;
 	struct page *page = NULL;
 	struct kernel_siginfo info;
-	pte_t pt_entry;
-	bool read, write, exec;
+	bool write;
 	u64 paddr;
 	int ret;
-	bool unsynced = false;
-	void *old_sync_entry;
 
 	tsk = current;
 	mm = tsk->mm;
@@ -1117,7 +1060,10 @@ static void handle_pf(struct pt_regs *regs,
 
 	//pr_info("try to handle pf address:%lx, error_code: %lx", address, error_code);
 	if (error_code & X86_PF_WRITE)
+	{
 		flags |= FAULT_FLAG_WRITE;
+		gup_flags |= FOLL_WRITE;
+	}
 	if (error_code & X86_PF_INSTR)
 		flags |= FAULT_FLAG_INSTRUCTION;
 
@@ -1161,7 +1107,7 @@ retry:
 				goto sync_fail_before_lock;
 			mutex_lock(&sync_array_entry->sync_lock);
 
-			ret = get_user_pages(address, 1, 0, &page);
+			ret = get_user_pages(address, 1, gup_flags, &page);
 			if (ret < 1)
 			{
 				if (!fatal_signal_pending(current)) {
@@ -1170,18 +1116,20 @@ retry:
 				goto sync_fail;
 			}
 
-			// After pt walk, the entry is not necessarily a pte, but we can calculate the paddr based on the entry and the vaddr.
-			pt_entry = vaddr_to_pte_calibrated(address, mm);
-			if (pte_none(pt_entry))
-			{
-				pr_err("Cannot get the page table entry of a user address!\n");
-				goto sync_fail_page;
-			} else {
-				paddr = (pte_pfn(pt_entry) << PAGE_SHIFT) | (pte_val(pt_entry) & 0x3);
-				read = pte_present(pt_entry);
-				write = pte_write(pt_entry);
-				exec = pte_exec(pt_entry);
-			}
+			/*
+			 * Use the page returned by GUP as the source of truth.  Walking the
+			 * page tables separately can race with COW, migration and reclaim,
+			 * resulting in a different page being sent to the supervisor than
+			 * the page pinned below.
+			 *
+			 * A read fault is initially synchronized read-only.  A later write
+			 * fault pins the page with FOLL_WRITE (breaking COW if necessary)
+			 * and upgrades the supervisor mapping.
+			 */
+			write = error_code & X86_PF_WRITE;
+			paddr = page_to_phys(page) | 0x1;
+			if (write)
+				paddr |= 0x2;
 
 			sync_entry = xa_load(&sync_array_entry->array, PFN_DOWN(address));
 
@@ -1207,47 +1155,45 @@ retry:
 					goto sync_fail_page;
 				}
 
+				xa_erase(&sync_array_entry->array, PFN_DOWN(address));
+				if (sync_entry->paddr & 0x2)
+					set_page_dirty(sync_entry->page);
 				put_page(sync_entry->page);
 				encl->sync_page_cnt--;
-				unsynced = true;
+				kfree(sync_entry);
 			}
 
-
-			ret = sgx_encl_esync(encl, paddr, address & PAGE_MASK, read, write, false, (u64)mm);
-			//pr_info("esync address: 0x%lx, paddr: 0x%llx, pte: 0x%lx, mm: 0x%lx\n", address, paddr, pt_entry.pte, (unsigned long)mm);
-			if (ret)
+			new_sync_entry = kzalloc(sizeof(*new_sync_entry), GFP_KERNEL);
+			if (!new_sync_entry)
 			{
-				pr_err("esync has an error with vaddr:0x%lx, paddr:0x%llx, rwx: %d%d%d\n",
-					   address, paddr, read, write, exec);
+				pr_err("esync OOM");
 				goto sync_fail_page;
 			}
 
-			sync_entry = kzalloc(sizeof(struct sgx_encl_sync_page), GFP_KERNEL);
-			if (!sync_entry)
+			ret = sgx_encl_esync(encl, paddr, address & PAGE_MASK, true,
+						 write, false, (u64)mm);
+			if (ret)
 			{
+				pr_err("esync has an error with vaddr:0x%lx, paddr:0x%llx, rw: 1%d\n",
+					   address, paddr, write);
+				kfree(new_sync_entry);
+				goto sync_fail_page;
+			}
+
+			new_sync_entry->page = page;
+			new_sync_entry->paddr = paddr;
+			ret = xa_insert(&sync_array_entry->array, PFN_DOWN(address),
+					new_sync_entry, GFP_KERNEL);
+			if (ret) {
 				pr_err("esync OOM");
+				if (sgx_encl_eunsync(encl, paddr, address, (u64)mm))
+					pr_err("failed to roll back esync for vaddr:0x%lx, paddr:0x%llx\n",
+						   address, paddr);
+				kfree(new_sync_entry);
 				goto sync_fail_page;
 			}
 
 			encl->sync_page_cnt++;
-			sync_entry->page = page;
-			sync_entry->paddr = paddr;
-			old_sync_entry = xa_store(&sync_array_entry->array, PFN_DOWN(address), sync_entry, GFP_KERNEL);
-
-			if (xa_is_err(old_sync_entry)) {
-				pr_err("esync OOM");
-				goto sync_fail_page;
-			}
-
-			if (old_sync_entry)
-			{
-				if (!unsynced)
-				{
-					pr_err("old_sync_entry can be not null only after old page is unsynced");
-					goto sync_fail_page;
-				}
-				kfree(old_sync_entry);
-			}
 			mutex_unlock(&sync_array_entry->sync_lock);
 			// hold the page if esync is successful
 		}
