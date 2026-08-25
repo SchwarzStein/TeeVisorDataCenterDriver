@@ -702,7 +702,8 @@ static struct sgx_encl *clone_enclave(struct sgx_encl *parent_encl)
 	// cache sync page is not shared and will be added later
 	child_encl->page_cnt = parent_encl->page_cnt - 1;
 	child_encl->secs_child_cnt = parent_encl->secs_child_cnt - 1;
-	child_encl->sync_page_cnt = parent_encl->sync_page_cnt;
+	/* Shared mappings belong to an mm and are not inherited by a clone. */
+	child_encl->sync_page_cnt = 0;
 
 	// If any eaug happened between eclone and ecinit, retry here
 	if (!xa_empty(&parent_encl->eaug_retry_array)) {
@@ -1351,6 +1352,7 @@ static int sgx_mmu_notifier_invalidate_start(struct mmu_notifier *mn,
 				xa_erase(&sync_array_entry->array, sync_vfn);
 				put_page(sync_entry->page);
 				kfree(sync_entry);
+				encl->sync_page_cnt--;
 			}
 		}
 		// mutex_unlock(&sync_array_entry->sync_lock);
