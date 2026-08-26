@@ -795,6 +795,62 @@ void sgx_free_epc_page(struct sgx_epc_page *page)
 }
 */
 
+/*
+ * Drop a driver reference after SVSM has already updated the EPCM state.
+ * This must not issue EREMOVE: COW slot publication means the supervisor has
+ * already removed this enclave's ownership of the old page.
+ */
+static long sgx_put_epc_page_no_eremove(struct sgx_epc_page *epc_page)
+{
+	struct enclave_cache_block_entry *block_entry;
+	unsigned long block_end_pfn;
+	unsigned long size_pages;
+	long block_counter;
+	long epc_counter;
+
+	epc_counter = atomic_long_dec_return(&epc_page->counter);
+	if (WARN_ON_ONCE(epc_counter < 0))
+		return epc_counter;
+
+	if (epc_counter)
+		return epc_counter;
+
+	spin_lock(&sgx_page_pool_lock);
+	list_del_init(&epc_page->list);
+	spin_unlock(&sgx_page_pool_lock);
+
+	if (!(epc_page->flags & SGX_EPC_PAGE_BLOCK_CACHE)) {
+		struct page *page = pfn_to_page(epc_page->pfn);
+
+		__free_page(page);
+		goto free_metadata;
+	}
+
+	block_end_pfn = epc_page->pfn;
+	block_entry = xa_find(&cache_block_array, &block_end_pfn,
+			      ULONG_MAX, XA_PRESENT);
+	if (!block_entry || block_entry->start > sgx_get_epc_phys_addr(epc_page)) {
+		pr_err("Invalid cache epc_page, cannot find the backend block!\n");
+		goto free_metadata;
+	}
+
+	block_counter = atomic_long_dec_return(&block_entry->counter);
+	if (WARN_ON_ONCE(block_counter < 0))
+		goto free_metadata;
+
+	if (!block_counter && atomic_long_read_acquire(&block_entry->consumed)) {
+		size_pages = (block_entry->end - block_entry->start + PAGE_SIZE) >> PAGE_SHIFT;
+		xa_erase(&cache_block_array, PFN_DOWN(block_entry->end));
+		free_pages((unsigned long)phys_to_virt(block_entry->start),
+			   fls(size_pages) - 1);
+		kfree(block_entry);
+	}
+
+free_metadata:
+	vfree(epc_page);
+	return epc_counter;
+}
+
 /**
  * sgx_free_epc_page() - Free an EPC page
  * @page:	an EPC page
@@ -822,45 +878,7 @@ retry:
 		return;
 	}
 
-	long epc_counter = atomic_long_dec_return_release(&epc_page->counter);
-	// unsigned long page_vaddr;
-	// if (epc_page->owner) {
-	// 	page_vaddr = epc_page->owner->desc;
-	// } else {
-	// 	page_vaddr = 0;
-	// }
-	
-	// // pr_info("sgx_free_epc_page epc_counter: %ld paddr: 0x%lx vaddr: 0x%lx\n", 
-	// // 	epc_counter,sgx_get_epc_phys_addr(epc_page), page_vaddr);
-	if (epc_counter == 0) {
-		spin_lock(&sgx_page_pool_lock);
-		list_del_init(&epc_page->list);
-		spin_unlock(&sgx_page_pool_lock);
-		if (!(epc_page->flags & SGX_EPC_PAGE_BLOCK_CACHE)) {
-			struct page *page = pfn_to_page(epc_page->pfn);
-			__free_page(page);
-		} else {
-			struct enclave_cache_block_entry* block_entry;
-			unsigned long size_pages;
-
-			block_entry = xa_find(&cache_block_array, &epc_page->pfn, ULONG_MAX, XA_PRESENT);
-			if (!block_entry) {
-				pr_err("Invalid cache epc_page, cannot find the backend block!");
-			}
-
-			long block_counter = atomic_long_dec_return_acquire(&block_entry->counter);
-			//pr_info("block_counter %ld\n", block_counter);
-			if (block_counter == 0 && atomic_long_read_acquire(&block_entry->consumed)) {
-				//pr_info("Free page block\n");
-				size_pages = (block_entry->end - block_entry->start + PAGE_SIZE) >> PAGE_SHIFT;
-				free_pages((unsigned long)phys_to_virt(block_entry->start), fls(size_pages) - 1);
-				xa_erase(&cache_block_array, PFN_DOWN(block_entry->end));
-				kfree(block_entry);
-			}
-		}
-		vfree(epc_page);
-	}
-
+	sgx_put_epc_page_no_eremove(epc_page);
 }
 
 /**
@@ -1657,11 +1675,14 @@ void sync_page_once(struct enclave_clone_sync_entry* sync_entry, bool terminate)
 				continue;
 			}
 
-			// To sync the update, first get the common epc_page and decrement the counter.
-			// Then allocate a new epc_page for the cache page and link it to the encl_page
+			/*
+			 * A count of one is valid here.  SVSM publishes the COW slot
+			 * before the driver updates its page entry, and another enclave
+			 * can release the other reference in the meantime.
+			 */
 			counter = atomic_long_read(&page_entry->epc_page->counter);
-			if (counter < 2) {
-				pr_err("Invalid epc page to update, the page should have more than one reference!");
+			if (WARN_ON_ONCE(counter <= 0)) {
+				pr_err("Invalid EPC reference count %ld for COW update\n", counter);
 				smp_store_release(&sync_slot[i].state, SLOT_READY);
 				continue;
 			}
@@ -1693,7 +1714,7 @@ void sync_page_once(struct enclave_clone_sync_entry* sync_entry, bool terminate)
 			old_epc_page = page_entry->epc_page;
 			atomic_long_inc_return_release(&block_entry->counter);
 			page_entry->epc_page = cache_page_epc;
-			atomic_long_dec_return_release(&old_epc_page->counter);
+			sgx_put_epc_page_no_eremove(old_epc_page);
 			if (sync_slot[i].new_paddr == block_entry->end) {
 				atomic_long_set_release(&block_entry->consumed, 1);
 				if (encl->current_cache_block == block_entry)
